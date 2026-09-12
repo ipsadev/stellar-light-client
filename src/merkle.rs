@@ -1,0 +1,142 @@
+use prost::{Message, Oneof};
+
+use crate::{error::ContractError, smt::HASH_SIZE};
+
+pub type Siblings = Vec<[u8; HASH_SIZE]>;
+pub type DecodedMembership = (Vec<u8>, Vec<u8>, Siblings);
+pub type DecodedNonMembership = (Vec<u8>, Siblings);
+
+#[derive(Clone, PartialEq, Message)]
+pub struct MerkleProof {
+    #[prost(message, repeated, tag = "1")]
+    pub proofs: Vec<CommitmentProof>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct CommitmentProof {
+    #[prost(oneof = "Proof", tags = "1, 3")]
+    pub proof: Option<Proof>,
+}
+
+#[derive(Clone, PartialEq, Oneof)]
+pub enum Proof {
+    #[prost(message, tag = "1")]
+    Exist(ExistenceProof),
+    #[prost(message, tag = "3")]
+    Nonexist(NonExistenceProof),
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct ExistenceProof {
+    #[prost(bytes = "vec", tag = "1")]
+    pub key: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub value: Vec<u8>,
+    #[prost(message, optional, tag = "3")]
+    pub leaf: Option<LeafOp>,
+    #[prost(message, repeated, tag = "4")]
+    pub path: Vec<InnerOp>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct NonExistenceProof {
+    #[prost(bytes = "vec", tag = "1")]
+    pub key: Vec<u8>,
+    #[prost(message, optional, tag = "2")]
+    pub left: Option<ExistenceProof>,
+    #[prost(message, optional, tag = "3")]
+    pub right: Option<ExistenceProof>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct LeafOp {
+    #[prost(int32, tag = "1")]
+    pub hash: i32,
+    #[prost(int32, tag = "2")]
+    pub prehash_key: i32,
+    #[prost(int32, tag = "3")]
+    pub prehash_value: i32,
+    #[prost(int32, tag = "4")]
+    pub length: i32,
+    #[prost(bytes = "vec", tag = "5")]
+    pub prefix: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct InnerOp {
+    #[prost(int32, tag = "1")]
+    pub hash: i32,
+    #[prost(bytes = "vec", tag = "2")]
+    pub prefix: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub suffix: Vec<u8>,
+}
+
+pub fn decode_membership_proof(bytes: &[u8]) -> Result<DecodedMembership, ContractError> {
+    let merkle = MerkleProof::decode(bytes)
+        .map_err(|e| ContractError::InvalidWire(format!("MerkleProof: {e}")))?;
+    let first = merkle
+        .proofs
+        .into_iter()
+        .next()
+        .ok_or(ContractError::MerkleVerificationFailed)?;
+    let existence = match first.proof.ok_or(ContractError::MerkleVerificationFailed)? {
+        Proof::Exist(e) => e,
+        Proof::Nonexist(_) => return Err(ContractError::MerkleVerificationFailed),
+    };
+
+    let siblings = extract_siblings(&existence.path)?;
+
+    Ok((existence.key, existence.value, siblings))
+}
+
+pub fn decode_non_membership_proof(bytes: &[u8]) -> Result<DecodedNonMembership, ContractError> {
+    let merkle = MerkleProof::decode(bytes)
+        .map_err(|e| ContractError::InvalidWire(format!("MerkleProof: {e}")))?;
+    let first = merkle
+        .proofs
+        .into_iter()
+        .next()
+        .ok_or(ContractError::MerkleVerificationFailed)?;
+    let nonexist = match first.proof.ok_or(ContractError::MerkleVerificationFailed)? {
+        Proof::Nonexist(n) => n,
+        Proof::Exist(_) => return Err(ContractError::MerkleVerificationFailed),
+    };
+
+    let inner = nonexist
+        .left
+        .ok_or(ContractError::MerkleVerificationFailed)?;
+
+    if !inner.value.is_empty() {
+        return Err(ContractError::MerkleVerificationFailed);
+    }
+
+    let siblings = extract_siblings(&inner.path)?;
+
+    Ok((nonexist.key, siblings))
+}
+
+fn extract_siblings(ops: &[InnerOp]) -> Result<Siblings, ContractError> {
+    ops.iter()
+        .map(extract_sibling)
+        .collect::<Result<Siblings, _>>()
+}
+
+pub fn extract_sibling(op: &InnerOp) -> Result<[u8; HASH_SIZE], ContractError> {
+    if !op.suffix.is_empty()
+        && op.suffix.len() == HASH_SIZE
+        && op.prefix.len() == 1
+        && op.prefix[0] == 0x01
+    {
+        op.suffix
+            .as_slice()
+            .try_into()
+            .map_err(|_| ContractError::MerkleVerificationFailed)
+    } else if op.suffix.is_empty() && op.prefix.len() == 1 + HASH_SIZE && op.prefix[0] == 0x01 {
+        op.prefix[1..]
+            .try_into()
+            .map_err(|_| ContractError::MerkleVerificationFailed)
+    } else {
+        Err(ContractError::MerkleVerificationFailed)
+    }
+}

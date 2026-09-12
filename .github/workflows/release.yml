@@ -1,0 +1,93 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "tag to build the release for (e.g. v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  release:
+    name: build, prove, publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - name: the tag must match the crate version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::tag $TAG does not match Cargo.toml version $version"
+            exit 1
+          fi
+          echo "tag $TAG matches crate version $version"
+
+      - name: build the artifact
+        run: ./scripts/release-build.sh dist
+
+      - name: prove the build reproduces from a cold cache
+        run: |
+          cp dist/checksums.txt /tmp/first.txt
+          docker volume rm -f stellar-light-client-target
+          rm -rf dist
+          ./scripts/release-build.sh dist
+          if ! diff -u /tmp/first.txt dist/checksums.txt; then
+            echo "::error::the light client build is not reproducible"
+            exit 1
+          fi
+          echo "rebuilt byte-identically"
+
+      - name: publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          onchain="$(awk '/ stellar_light_client.wasm$/ {print $1}' dist/checksums.txt)"
+
+          {
+            printf 'Stellar `08-wasm` light client, %s.\n\n' "$TAG"
+            printf '## On-chain checksum\n\n'
+            printf 'The value `MsgStoreCode` records, the sha256 of the **uncompressed** artifact:\n\n'
+            printf '```\n%s\n```\n\n' "$onchain"
+            printf '## Reproduce it\n\n'
+            printf 'Docker is required. A host build produces different bytes, so the script refuses to run without it.\n\n'
+            printf '```sh\n'
+            printf 'git clone --branch %s https://github.com/ipsadev/stellar-light-client\n' "$TAG"
+            printf 'cd stellar-light-client\n'
+            printf './scripts/release-build.sh dist\n'
+            printf 'cat dist/checksums.txt\n'
+            printf '```\n\n'
+            printf 'CI built this twice from a cold cache and compared the checksums before publishing.\n\n'
+            printf '## All checksums\n\n```\n'
+            cat dist/checksums.txt
+            printf '```\n'
+          } > /tmp/notes.md
+
+          assets="dist/stellar_light_client.wasm dist/stellar_light_client.wasm.gz dist/checksums.txt"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" $assets --clobber
+            gh release edit "$TAG" --notes-file /tmp/notes.md
+          else
+            gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md $assets
+          fi
