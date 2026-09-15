@@ -11,6 +11,18 @@ chain's own state machine.
 > No third-party security audit has been done, and the pinned testnet trust root
 > tolerates zero Byzantine faults.
 
+## Operations
+
+`docs/ops` covers verifying, storing, migrating and recovering the client on a
+chain.
+
+| Page | Answers |
+|---|---|
+| [verify.md](docs/ops/verify.md) | is the published artifact the one this source produces |
+| [store.md](docs/ops/store.md) | how does the wasm get onto a chain |
+| [migrate.md](docs/ops/migrate.md) | how is a stored client moved to a new version, or recovered |
+| [incidents.md](docs/ops/incidents.md) | what breaks, how it is detected, what to do |
+
 ## Working on it
 
 Recipes live in the `justfile`; `just --list` shows them all.
