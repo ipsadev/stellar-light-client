@@ -1,4 +1,6 @@
-use prost::{Message, Oneof};
+pub use ics23::commitment_proof::Proof;
+pub use ics23::{CommitmentProof, ExistenceProof, InnerOp, LeafOp, NonExistenceProof};
+use prost::Message;
 
 use crate::{error::ContractError, smt::HASH_SIZE};
 
@@ -12,66 +14,6 @@ pub struct MerkleProof {
     pub proofs: Vec<CommitmentProof>,
 }
 
-#[derive(Clone, PartialEq, Message)]
-pub struct CommitmentProof {
-    #[prost(oneof = "Proof", tags = "1, 2")]
-    pub proof: Option<Proof>,
-}
-
-#[derive(Clone, PartialEq, Oneof)]
-pub enum Proof {
-    #[prost(message, tag = "1")]
-    Exist(ExistenceProof),
-    #[prost(message, tag = "2")]
-    Nonexist(NonExistenceProof),
-}
-
-#[derive(Clone, PartialEq, Message)]
-pub struct ExistenceProof {
-    #[prost(bytes = "vec", tag = "1")]
-    pub key: Vec<u8>,
-    #[prost(bytes = "vec", tag = "2")]
-    pub value: Vec<u8>,
-    #[prost(message, optional, tag = "3")]
-    pub leaf: Option<LeafOp>,
-    #[prost(message, repeated, tag = "4")]
-    pub path: Vec<InnerOp>,
-}
-
-#[derive(Clone, PartialEq, Message)]
-pub struct NonExistenceProof {
-    #[prost(bytes = "vec", tag = "1")]
-    pub key: Vec<u8>,
-    #[prost(message, optional, tag = "2")]
-    pub left: Option<ExistenceProof>,
-    #[prost(message, optional, tag = "3")]
-    pub right: Option<ExistenceProof>,
-}
-
-#[derive(Clone, PartialEq, Message)]
-pub struct LeafOp {
-    #[prost(int32, tag = "1")]
-    pub hash: i32,
-    #[prost(int32, tag = "2")]
-    pub prehash_key: i32,
-    #[prost(int32, tag = "3")]
-    pub prehash_value: i32,
-    #[prost(int32, tag = "4")]
-    pub length: i32,
-    #[prost(bytes = "vec", tag = "5")]
-    pub prefix: Vec<u8>,
-}
-
-#[derive(Clone, PartialEq, Message)]
-pub struct InnerOp {
-    #[prost(int32, tag = "1")]
-    pub hash: i32,
-    #[prost(bytes = "vec", tag = "2")]
-    pub prefix: Vec<u8>,
-    #[prost(bytes = "vec", tag = "3")]
-    pub suffix: Vec<u8>,
-}
-
 pub fn decode_membership_proof(bytes: &[u8]) -> Result<DecodedMembership, ContractError> {
     let merkle = MerkleProof::decode(bytes)
         .map_err(|e| ContractError::InvalidWire(format!("MerkleProof: {e}")))?;
@@ -82,7 +24,7 @@ pub fn decode_membership_proof(bytes: &[u8]) -> Result<DecodedMembership, Contra
         .ok_or(ContractError::MerkleVerificationFailed)?;
     let existence = match first.proof.ok_or(ContractError::MerkleVerificationFailed)? {
         Proof::Exist(e) => e,
-        Proof::Nonexist(_) => return Err(ContractError::MerkleVerificationFailed),
+        _ => return Err(ContractError::MerkleVerificationFailed),
     };
 
     let siblings = extract_siblings(&existence.path)?;
@@ -100,7 +42,7 @@ pub fn decode_non_membership_proof(bytes: &[u8]) -> Result<DecodedNonMembership,
         .ok_or(ContractError::MerkleVerificationFailed)?;
     let nonexist = match first.proof.ok_or(ContractError::MerkleVerificationFailed)? {
         Proof::Nonexist(n) => n,
-        Proof::Exist(_) => return Err(ContractError::MerkleVerificationFailed),
+        _ => return Err(ContractError::MerkleVerificationFailed),
     };
 
     let inner = nonexist

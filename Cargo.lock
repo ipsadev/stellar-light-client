@@ -395,7 +395,7 @@ dependencies = [
  "cw-storage-plus",
  "cw-utils",
  "itertools 0.14.0",
- "prost",
+ "prost 0.14.4",
  "schemars",
  "serde",
  "sha2",
@@ -646,6 +646,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ics23"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73b17f1a5bd7d12ad30a21445cfa5f52fd7651cb3243ba866f9916b1ec112f12"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "hex",
+ "prost 0.13.5",
+]
+
+[[package]]
 name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -784,12 +796,35 @@ dependencies = [
 
 [[package]]
 name = "prost"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2796faa41db3ec313a31f7624d9286acf277b52de526150b7e69f3debf891ee5"
+dependencies = [
+ "bytes",
+ "prost-derive 0.13.5",
+]
+
+[[package]]
+name = "prost"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
 dependencies = [
  "bytes",
- "prost-derive",
+ "prost-derive 0.14.4",
+]
+
+[[package]]
+name = "prost-derive"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
+dependencies = [
+ "anyhow",
+ "itertools 0.14.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1046,7 +1081,9 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stellar-consensus-verifier"
-version = "0.3.0"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47635ac44720787812ea5a1012e7e7b358ea4f48866c4807da1007f684595390"
 dependencies = [
  "ed25519-dalek",
  "sha2",
@@ -1055,12 +1092,13 @@ dependencies = [
 
 [[package]]
 name = "stellar-light-client"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "cosmwasm-std",
  "cw-multi-test",
  "ed25519-dalek",
- "prost",
+ "ics23",
+ "prost 0.13.5",
  "serde",
  "serde_json",
  "sha2",
