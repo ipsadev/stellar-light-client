@@ -14,7 +14,7 @@ pub struct MerkleProof {
 
 #[derive(Clone, PartialEq, Message)]
 pub struct CommitmentProof {
-    #[prost(oneof = "Proof", tags = "1, 3")]
+    #[prost(oneof = "Proof", tags = "1, 2")]
     pub proof: Option<Proof>,
 }
 
@@ -22,7 +22,7 @@ pub struct CommitmentProof {
 pub enum Proof {
     #[prost(message, tag = "1")]
     Exist(ExistenceProof),
-    #[prost(message, tag = "3")]
+    #[prost(message, tag = "2")]
     Nonexist(NonExistenceProof),
 }
 
