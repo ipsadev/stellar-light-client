@@ -6,9 +6,15 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "tag to build the release for (e.g. v0.1.0)"
-        required: true
+        description: "tag to build the release for (e.g. v1.0.1); leave empty with dry_run to rehearse the branch this runs from"
+        required: false
+        default: ""
         type: string
+      dry_run:
+        description: "build and prove reproducibility, but publish nothing"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -18,7 +24,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  TAG: ${{ github.event_name == 'push' && github.ref_name || github.event.inputs.tag }}
 
 jobs:
   release:
@@ -31,17 +37,52 @@ jobs:
       - name: checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.TAG || github.ref }}
           fetch-depth: 0
 
       - name: the tag must match the crate version
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          if [ "$TAG" != "v$version" ]; then
+          if [ -z "$TAG" ]; then
+            if [ "$DRY_RUN" != "true" ]; then
+              echo "::error::a release needs a tag; to rehearse without one, run with dry_run"
+              exit 1
+            fi
+            echo "TAG=v$version" >> "$GITHUB_ENV"
+            echo "::notice::rehearsing v$version from $GITHUB_REF_NAME, no tag needed"
+          elif [ "$TAG" != "v$version" ]; then
             echo "::error::tag $TAG does not match Cargo.toml version $version"
             exit 1
+          else
+            echo "tag $TAG matches crate version $version"
           fi
-          echo "tag $TAG matches crate version $version"
+
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@1.91.1
+        with:
+          components: rustfmt, clippy
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: setup just
+        uses: extractions/setup-just@v3
+
+      - name: cache cargo-audit binary
+        id: cache-cargo-audit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-latest-1
+
+      - name: install cargo-audit
+        if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --locked
+
+      - name: just ci
+        run: just ci
 
       - name: build the artifact
         run: ./scripts/release-build.sh dist
@@ -58,7 +99,14 @@ jobs:
           fi
           echo "rebuilt byte-identically"
 
+      - name: say what a dry run skipped
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        run: |
+          echo "::notice::dry run - built twice from a cold cache, byte-identical, nothing was published"
+          cat dist/checksums.txt
+
       - name: publish the release
+        if: ${{ github.event.inputs.dry_run != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -85,9 +133,19 @@ jobs:
 
           assets="dist/stellar_light_client.wasm dist/stellar_light_client.wasm.gz dist/checksums.txt"
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" $assets --clobber
-            gh release edit "$TAG" --notes-file /tmp/notes.md
-          else
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md $assets
+            exit 0
           fi
+
+          if gh release download "$TAG" --pattern checksums.txt --dir /tmp/published 2>/dev/null; then
+            if ! diff -u /tmp/published/checksums.txt dist/checksums.txt; then
+              echo "::error::release $TAG already carries different artifacts; a published checksum is never replaced"
+              exit 1
+            fi
+            echo "::notice::release $TAG already carries these exact artifacts; only the notes are refreshed"
+          else
+            gh release upload "$TAG" $assets
+          fi
+
+          gh release edit "$TAG" --notes-file /tmp/notes.md
