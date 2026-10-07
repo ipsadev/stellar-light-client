@@ -7,7 +7,6 @@ pub const SUBJECT_PREFIX: &[u8] = b"subject/";
 pub const SUBSTITUTE_PREFIX: &[u8] = b"substitute/";
 
 const CLIENT_STATE_KEY: &[u8] = b"clientState";
-const CHECKSUM_KEY: &[u8] = b"wasmChecksum";
 const STELLAR_REVISION_NUMBER: u64 = 0;
 const WASM_CLIENT_STATE_TYPE_URL: &str = "/ibc.lightclients.wasm.v1.ClientState";
 const WASM_CONSENSUS_STATE_TYPE_URL: &str = "/ibc.lightclients.wasm.v1.ConsensusState";
@@ -24,16 +23,25 @@ fn prefixed(prefix: &[u8], key: &[u8]) -> alloc::vec::Vec<u8> {
     out
 }
 
-pub fn set_checksum(storage: &mut dyn Storage, checksum: &[u8]) {
-    if !checksum.is_empty() {
-        storage.set(CHECKSUM_KEY, checksum);
-    }
+fn wasm_client_state_prefixed(storage: &dyn Storage, prefix: &[u8]) -> Option<WasmClientState> {
+    let raw = storage.get(prefixed(prefix, CLIENT_STATE_KEY).as_slice())?;
+    let any = Any::decode(raw.as_slice()).ok()?;
+
+    WasmClientState::decode(any.value.as_slice()).ok()
 }
 
-fn checksum_prefixed(storage: &dyn Storage, prefix: &[u8]) -> alloc::vec::Vec<u8> {
-    storage
-        .get(prefixed(prefix, CHECKSUM_KEY).as_slice())
+pub fn checksum(storage: &dyn Storage) -> alloc::vec::Vec<u8> {
+    checksum_prefixed(storage, &[])
+}
+
+pub fn checksum_prefixed(storage: &dyn Storage, prefix: &[u8]) -> alloc::vec::Vec<u8> {
+    wasm_client_state_prefixed(storage, prefix)
+        .map(|wasm| wasm.checksum)
         .unwrap_or_default()
+}
+
+pub fn init_client_state(storage: &mut dyn Storage, client_state: &ClientState, checksum: &[u8]) {
+    write_client_state(storage, &[], client_state, checksum.to_vec());
 }
 
 pub fn set_client_state(storage: &mut dyn Storage, client_state: &ClientState) {
@@ -45,9 +53,20 @@ pub fn set_client_state_prefixed(
     prefix: &[u8],
     client_state: &ClientState,
 ) {
+    let checksum = checksum_prefixed(storage, prefix);
+
+    write_client_state(storage, prefix, client_state, checksum);
+}
+
+fn write_client_state(
+    storage: &mut dyn Storage,
+    prefix: &[u8],
+    client_state: &ClientState,
+    checksum: alloc::vec::Vec<u8>,
+) {
     let wasm = WasmClientState {
         data: client_state.encode_to_vec(),
-        checksum: checksum_prefixed(storage, prefix),
+        checksum,
         latest_height: client_state.latest_height.clone(),
     };
 
@@ -67,9 +86,7 @@ pub fn client_state(storage: &dyn Storage) -> Option<ClientState> {
 }
 
 pub fn client_state_prefixed(storage: &dyn Storage, prefix: &[u8]) -> Option<ClientState> {
-    let raw = storage.get(prefixed(prefix, CLIENT_STATE_KEY).as_slice())?;
-    let any = Any::decode(raw.as_slice()).ok()?;
-    let wasm = WasmClientState::decode(any.value.as_slice()).ok()?;
+    let wasm = wasm_client_state_prefixed(storage, prefix)?;
 
     ClientState::decode(wasm.data.as_slice()).ok()
 }

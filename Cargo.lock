@@ -1219,7 +1219,7 @@ dependencies = [
 
 [[package]]
 name = "stellar-light-client"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "cosmwasm-std",
  "cw-multi-test",

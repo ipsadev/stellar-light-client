@@ -1,5 +1,6 @@
-pub use ics23::commitment_proof::Proof;
-pub use ics23::{CommitmentProof, ExistenceProof, InnerOp, LeafOp, NonExistenceProof};
+pub use ics23::{
+    commitment_proof::Proof, CommitmentProof, ExistenceProof, InnerOp, LeafOp, NonExistenceProof,
+};
 use prost::Message;
 
 use crate::{error::ContractError, smt::HASH_SIZE};

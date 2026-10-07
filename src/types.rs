@@ -37,6 +37,8 @@ pub struct ClientState {
     pub router_contract_id: alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "9")]
     pub root_event_topic: alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "10")]
+    pub generation: u64,
 }
 
 #[derive(Clone, PartialEq, Eq, Message, Serialize, Deserialize)]
@@ -57,6 +59,8 @@ pub struct ConsensusState {
     pub ledger_hash: alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "3")]
     pub root: alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "4")]
+    pub generation: u64,
 }
 
 #[derive(Clone, PartialEq, Eq, Message, Serialize, Deserialize)]

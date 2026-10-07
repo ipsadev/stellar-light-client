@@ -48,6 +48,7 @@ fn client_state(latest: u64, quorum_seed: u8) -> ClientState {
         max_consensus_age: 1_000_000,
         router_contract_id: vec![0xcd; 32],
         root_event_topic: b"ibc_root".to_vec(),
+        generation: 0,
     }
 }
 
@@ -56,6 +57,7 @@ fn consensus(seconds_ago: u64, seed: u8) -> ConsensusState {
         timestamp: mock_env().block.time.seconds().saturating_sub(seconds_ago),
         ledger_hash: vec![seed; 32],
         root: vec![seed ^ 0xff; 32],
+        generation: 0,
     }
 }
 
@@ -152,7 +154,13 @@ fn the_substitutes_consensus_state_is_copied_to_the_subject() {
     )
     .expect("consensus state copied to the subject");
 
-    assert_eq!(copied, consensus(100, 0x22));
+    assert_eq!(
+        copied,
+        ConsensusState {
+            generation: 1,
+            ..consensus(100, 0x22)
+        }
+    );
 }
 
 #[test]
@@ -330,5 +338,41 @@ fn migrating_without_the_consensus_state_at_latest_height_is_refused() {
     assert!(matches!(
         migrate(deps.as_mut(), mock_env(), MigrateMsg {}),
         Err(ContractError::ConsensusStateMissing { height }) if height == SUBJECT_HEIGHT
+    ));
+}
+
+#[test]
+fn recovery_starts_a_new_generation() {
+    let mut deps = staged(
+        client_state(SUBJECT_HEIGHT, 0x01),
+        client_state(SUBSTITUTE_HEIGHT, 0x02),
+    );
+
+    migrate(&mut deps).expect("migration should succeed");
+    let migrated = client_state_prefixed(&deps.storage, SUBJECT_PREFIX).expect("subject present");
+    let stale = stellar_light_client::store::consensus_state_prefixed(
+        &deps.storage,
+        SUBJECT_PREFIX,
+        SUBJECT_HEIGHT,
+    )
+    .expect("the old state is still in storage");
+
+    assert_eq!(migrated.generation, 1);
+    assert_ne!(
+        stale.generation, migrated.generation,
+        "the subject's pre-recovery states must not count as trusted"
+    );
+}
+
+#[test]
+fn a_substitute_that_never_expires_is_refused() {
+    let mut substitute = client_state(SUBSTITUTE_HEIGHT, 0x02);
+
+    substitute.max_consensus_age = 0;
+    let mut deps = staged(client_state(SUBJECT_HEIGHT, 0x01), substitute);
+
+    assert!(matches!(
+        migrate(&mut deps),
+        Err(ContractError::InvalidClientState(_))
     ));
 }

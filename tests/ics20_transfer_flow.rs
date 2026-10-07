@@ -73,9 +73,10 @@ fn client_state(latest_height: u64, frozen: Option<u64>) -> ClientState {
         }],
         proof_specs: vec![],
         network_id: NETWORK_ID.to_vec(),
-        max_consensus_age: 0,
-        router_contract_id: Vec::new(),
-        root_event_topic: Vec::new(),
+        max_consensus_age: 4_000_000_000,
+        router_contract_id: vec![0x5a; 32],
+        root_event_topic: b"ibc_root".to_vec(),
+        generation: 0,
     }
 }
 
@@ -96,17 +97,28 @@ fn instantiate_full(
     let code_id = app.store_code(light_client());
     let admin = app.api().addr_make("admin");
     let msg = InstantiateMsg {
-        client_state: encode(&client_state(height, frozen)),
+        client_state: encode(&client_state(height, None)),
         consensus_state: encode(&ConsensusState {
             timestamp: 1_000_000 + height,
             ledger_hash: LEDGER_HASH.to_vec(),
             root: root.to_vec(),
+            generation: 0,
         }),
         checksum: Binary::default(),
     };
 
-    app.instantiate_contract(code_id, admin, &msg, &[], "stellar-light-client", None)
-        .expect("instantiate")
+    let addr = app
+        .instantiate_contract(code_id, admin, &msg, &[], "stellar-light-client", None)
+        .expect("instantiate");
+
+    if frozen.is_some() {
+        stellar_light_client::store::set_client_state(
+            app.contract_storage_mut(&addr).as_mut(),
+            &client_state(height, frozen),
+        );
+    }
+
+    addr
 }
 
 fn wasm_sudo(app: &mut App, addr: &cosmwasm_std::Addr, msg: &SudoMsg) -> AppResponse {
@@ -296,7 +308,7 @@ fn app_instantiate_exposes_height_status_and_timestamp() {
         )
         .unwrap();
 
-    assert_eq!(ts.timestamp, 1_000_100);
+    assert_eq!(ts.timestamp, 1_000_100 * 1_000_000_000);
 }
 
 #[test]

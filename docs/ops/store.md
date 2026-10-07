@@ -4,8 +4,8 @@
 configured authority and rejects anything else, so there are exactly two ways for the wasm to land:
 the authority signs it, or someone holding an authz grant from the authority signs it on its behalf.
 
-Nothing about this is specific to ipsa. It is the same path the Ethereum light client took onto the
-Cosmos Hub.
+Nothing about this is specific to this client. It is the same path the Ethereum light client took
+onto the Cosmos Hub.
 
 ## Find out which door applies
 

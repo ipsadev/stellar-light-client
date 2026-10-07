@@ -23,6 +23,7 @@ use stellar_light_client::{
 const CHAIN_ID: &str = "stellar-testnet";
 const ROOT_INIT: [u8; 32] = [0x11; 32];
 const LEDGER_HASH_INIT: [u8; 32] = [0xaa; 32];
+const TRUSTED_FOR_SECONDS: u64 = 4_000_000_000;
 
 fn network_id() -> [u8; 32] {
     Sha256::digest(b"Test SDF Network ; September 2015").into()
@@ -154,9 +155,10 @@ fn fresh_client_state(latest_height: u64) -> ClientState {
         }],
         proof_specs: vec![],
         network_id: network_id().to_vec(),
-        max_consensus_age: 0,
-        router_contract_id: Vec::new(),
-        root_event_topic: Vec::new(),
+        max_consensus_age: TRUSTED_FOR_SECONDS,
+        router_contract_id: ROUTER_ID.to_vec(),
+        root_event_topic: ROOT_TOPIC.to_vec(),
+        generation: 0,
     }
 }
 
@@ -165,6 +167,7 @@ fn fresh_consensus_state(ts: u64, ledger_hash: [u8; 32], root: [u8; 32]) -> Cons
         timestamp: ts,
         ledger_hash: ledger_hash.to_vec(),
         root: root.to_vec(),
+        generation: 0,
     }
 }
 
@@ -267,7 +270,7 @@ fn instantiate_stores_state_and_consensus() {
     )
     .unwrap();
 
-    assert_eq!(ts.timestamp, 1_000_000);
+    assert_eq!(ts.timestamp, 1_000_000 * 1_000_000_000);
 }
 
 #[test]
@@ -660,6 +663,7 @@ fn verify_membership_accepts_valid_proof_against_matching_root() {
         timestamp: 1_000_000,
         ledger_hash: LEDGER_HASH_INIT.to_vec(),
         root: root.to_vec(),
+        generation: 0,
     };
 
     instantiate(
@@ -998,17 +1002,15 @@ fn a_live_client_is_still_advanced_while_max_consensus_age_is_set() {
 }
 
 #[test]
-fn max_consensus_age_of_zero_disables_expiry() {
-    let mut deps = mock_dependencies();
+fn max_consensus_age_of_zero_is_refused() {
+    let mut cs = fresh_client_state(100);
 
-    do_instantiate(&mut deps); // fresh_client_state uses max_consensus_age = 0
-    let status: StatusResult = serde_json::from_slice(
-        query(deps.as_ref(), mock_env(), QueryMsg::Status {})
-            .unwrap()
-            .as_slice(),
-    )
-    .unwrap();
-    assert_eq!(status.status, ClientStatus::Active);
+    cs.max_consensus_age = 0;
+
+    assert!(matches!(
+        instantiate_with(cs),
+        Err(ContractError::InvalidClientState(_))
+    ));
 }
 
 #[test]
@@ -1482,4 +1484,337 @@ fn a_packet_commitment_verifies_against_the_bound_root() {
         }),
     )
     .expect("membership verifies against the bound root");
+}
+
+fn instantiate_with_checksum(
+    deps: &mut cosmwasm_std::OwnedDeps<
+        cosmwasm_std::MemoryStorage,
+        cosmwasm_std::testing::MockApi,
+        cosmwasm_std::testing::MockQuerier,
+    >,
+    checksum: [u8; 32],
+) {
+    let info = message_info(&deps.api.addr_make("creator"), &[]);
+
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        info,
+        InstantiateMsg {
+            client_state: encode(&fresh_client_state(100)),
+            consensus_state: encode(&fresh_consensus_state(
+                1_000_000,
+                LEDGER_HASH_INIT,
+                ROOT_INIT,
+            )),
+            checksum: Binary::new(checksum.to_vec()),
+        },
+    )
+    .expect("instantiate");
+}
+
+fn migrate_code_as_08_wasm_does(storage: &mut dyn cosmwasm_std::Storage, checksum: [u8; 32]) {
+    use stellar_light_client::types::{Any, WasmClientState};
+
+    let raw = storage.get(b"clientState").expect("client state stored");
+    let mut any = Any::decode(raw.as_slice()).expect("any");
+    let mut wasm = WasmClientState::decode(any.value.as_slice()).expect("wasm client state");
+
+    wasm.checksum = checksum.to_vec();
+    any.value = wasm.encode_to_vec();
+    storage.set(b"clientState", &any.encode_to_vec());
+}
+
+fn membership_at(height: MsgHeight, delay_time: u64, delay_blocks: u64) -> SudoMsg {
+    SudoMsg::VerifyMembership(VerifyMembershipMsg {
+        height,
+        delay_time_period: delay_time,
+        delay_block_period: delay_blocks,
+        proof: Binary::default(),
+        merkle_path: MerklePath { key_path: vec![] },
+        value: Binary::default(),
+    })
+}
+
+fn height_at(revision_number: u64, revision_height: u64) -> MsgHeight {
+    MsgHeight {
+        revision_number,
+        revision_height,
+    }
+}
+
+#[test]
+fn instantiate_records_the_checksum_in_the_client_state() {
+    let mut deps = mock_dependencies();
+
+    instantiate_with_checksum(&mut deps, [0xc1; 32]);
+
+    assert_eq!(
+        stellar_light_client::store::checksum(deps.as_ref().storage),
+        vec![0xc1; 32]
+    );
+}
+
+#[test]
+fn an_update_after_a_code_migration_keeps_the_new_checksum() {
+    let mut deps = mock_dependencies();
+
+    instantiate_with_checksum(&mut deps, [0xc1; 32]);
+    migrate_code_as_08_wasm_does(deps.as_mut().storage, [0xc2; 32]);
+    push_header(&mut deps, &header(105)).expect("the client still advances after migration");
+
+    assert_eq!(
+        stellar_light_client::store::checksum(deps.as_ref().storage),
+        vec![0xc2; 32],
+        "08-wasm rejects any sudo that changes the checksum"
+    );
+}
+
+#[test]
+fn freezing_after_a_code_migration_keeps_the_new_checksum() {
+    let mut deps = mock_dependencies();
+
+    instantiate_with_checksum(&mut deps, [0xc1; 32]);
+    migrate_code_as_08_wasm_does(deps.as_mut().storage, [0xc2; 32]);
+    freeze_with_fork(&mut deps, 105);
+
+    assert_eq!(
+        stellar_light_client::store::checksum(deps.as_ref().storage),
+        vec![0xc2; 32]
+    );
+}
+
+#[test]
+fn a_timestamp_too_large_for_nanoseconds_is_an_error_not_a_wrap() {
+    let mut deps = mock_dependencies();
+    let info = message_info(&deps.api.addr_make("creator"), &[]);
+
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        info,
+        InstantiateMsg {
+            client_state: encode(&fresh_client_state(100)),
+            consensus_state: encode(&fresh_consensus_state(
+                u64::MAX,
+                LEDGER_HASH_INIT,
+                ROOT_INIT,
+            )),
+            checksum: Binary::default(),
+        },
+    )
+    .expect("instantiate");
+    let err = query(
+        deps.as_ref(),
+        mock_env(),
+        QueryMsg::TimestampAtHeight {
+            height: height_at(0, 100),
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, ContractError::TimestampOverflow { .. }));
+}
+
+#[test]
+fn a_root_bound_later_replaces_an_unbound_consensus_state() {
+    let mut deps = mock_dependencies();
+    let root = [0x7c; 32];
+    let bound = header_with_root(105, root);
+    let unbound = StellarHeader {
+        state_root_proof: None,
+        ..bound.clone()
+    };
+
+    instantiate_with_router(&mut deps);
+    push_header(&mut deps, &unbound).expect("a root-less header still verifies");
+    push_header(&mut deps, &bound).expect("the same ledger with its root is accepted");
+    let cons = stellar_light_client::store::consensus_state(deps.as_ref().storage, 105).unwrap();
+
+    assert_eq!(
+        cons.root,
+        root.to_vec(),
+        "a root-less update cannot block the root"
+    );
+}
+
+#[test]
+fn a_root_less_update_cannot_erase_a_bound_root() {
+    let mut deps = mock_dependencies();
+    let root = [0x7c; 32];
+    let bound = header_with_root(105, root);
+    let unbound = StellarHeader {
+        state_root_proof: None,
+        ..bound.clone()
+    };
+
+    instantiate_with_router(&mut deps);
+    push_header(&mut deps, &bound).expect("verifies");
+    push_header(&mut deps, &unbound).expect("a replay without the root is a no-op");
+    let cons = stellar_light_client::store::consensus_state(deps.as_ref().storage, 105).unwrap();
+
+    assert_eq!(cons.root, root.to_vec());
+}
+
+#[test]
+fn a_delay_period_is_refused_rather_than_ignored() {
+    let mut deps = mock_dependencies();
+
+    do_instantiate(&mut deps);
+
+    for (time, blocks) in [(1, 0), (0, 1)] {
+        let err = sudo(
+            deps.as_mut(),
+            mock_env(),
+            membership_at(height_at(0, 100), time, blocks),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ContractError::DelayPeriodUnsupported { .. }));
+    }
+}
+
+#[test]
+fn a_non_zero_revision_number_is_refused() {
+    let mut deps = mock_dependencies();
+
+    do_instantiate(&mut deps);
+    let err = sudo(
+        deps.as_mut(),
+        mock_env(),
+        membership_at(height_at(1, 100), 0, 0),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ContractError::RevisionNumberUnsupported { revision: 1 }
+    ));
+}
+
+#[test]
+fn consensus_states_from_before_a_recovery_are_not_trusted() {
+    let mut deps = mock_dependencies();
+
+    do_instantiate(&mut deps);
+    let mut cs = stellar_light_client::store::client_state(deps.as_ref().storage).unwrap();
+
+    cs.generation = 1;
+    stellar_light_client::store::set_client_state(deps.as_mut().storage, &cs);
+    let err = sudo(
+        deps.as_mut(),
+        mock_env(),
+        membership_at(height_at(0, 100), 0, 0),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ContractError::ConsensusStateMissing { height: 100 }
+    ));
+}
+
+#[test]
+fn a_header_at_the_last_slot_is_refused_without_overflowing() {
+    let mut deps = mock_dependencies();
+
+    do_instantiate(&mut deps);
+    let hdr = StellarHeader {
+        slot_index: u64::MAX,
+        ..header(105)
+    };
+
+    assert!(matches!(
+        push_header(&mut deps, &hdr),
+        Err(ContractError::SlotOverflow { slot: u64::MAX })
+    ));
+}
+
+#[test]
+fn instantiate_refuses_a_malformed_client_or_consensus_state() {
+    let base = fresh_client_state(100);
+    let cases: Vec<(&str, ClientState)> = vec![
+        (
+            "revision number",
+            ClientState {
+                latest_height: Some(WireHeight {
+                    revision_number: 1,
+                    revision_height: 100,
+                }),
+                ..base.clone()
+            },
+        ),
+        (
+            "zero height",
+            ClientState {
+                latest_height: Some(WireHeight {
+                    revision_number: 0,
+                    revision_height: 0,
+                }),
+                ..base.clone()
+            },
+        ),
+        (
+            "frozen",
+            ClientState {
+                frozen_height: Some(WireHeight {
+                    revision_number: 0,
+                    revision_height: 100,
+                }),
+                ..base.clone()
+            },
+        ),
+        (
+            "router id",
+            ClientState {
+                router_contract_id: vec![0x5a; 31],
+                ..base.clone()
+            },
+        ),
+        (
+            "root topic",
+            ClientState {
+                root_event_topic: Vec::new(),
+                ..base.clone()
+            },
+        ),
+        (
+            "network id",
+            ClientState {
+                network_id: vec![0x01; 16],
+                ..base.clone()
+            },
+        ),
+        (
+            "chain id",
+            ClientState {
+                chain_id: String::new(),
+                ..base.clone()
+            },
+        ),
+    ];
+
+    for (what, cs) in cases {
+        assert!(instantiate_with(cs).is_err(), "{what} must be refused");
+    }
+
+    let mut deps = mock_dependencies();
+    let info = message_info(&deps.api.addr_make("creator"), &[]);
+    let short_hash = ConsensusState {
+        ledger_hash: vec![0xaa; 31],
+        ..fresh_consensus_state(1_000_000, LEDGER_HASH_INIT, ROOT_INIT)
+    };
+    let err = instantiate(
+        deps.as_mut(),
+        mock_env(),
+        info,
+        InstantiateMsg {
+            client_state: encode(&base),
+            consensus_state: encode(&short_hash),
+            checksum: Binary::default(),
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, ContractError::InvalidConsensusState(_)));
 }

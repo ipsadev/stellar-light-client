@@ -18,7 +18,9 @@ Store the new wasm first, exactly as in [store.md](store.md), then point the exi
 gaiad tx ibc-wasm migrate-contract <client-id> <new-checksum> '{}' --from <grantee>
 ```
 
-The client keeps its id, so counterparties and channels are unaffected. Verify:
+The client keeps its id, so counterparties and channels are unaffected. The contract reads its
+checksum from the stored client state on every write, so after the migration it keeps the new
+checksum and goes on updating, freezing and recovering normally. Verify:
 
 ```sh
 gaiad q ibc client state <client-id> --node <rpc>
@@ -42,7 +44,9 @@ This client copies from the substitute:
 - `max_consensus_age`
 - the consensus state at the substitute's height
 
-and clears `frozen_height`. It keeps from the subject:
+clears `frozen_height`, and starts a new generation. Every consensus state the subject stored before
+the recovery stays in storage but is no longer trusted: proofs, updates and misbehaviour checks only
+use states from the current generation, so nothing from a forked or stale branch survives. It keeps from the subject:
 
 - `chain_id`
 - `network_id`
@@ -56,7 +60,8 @@ identity and the router contract must not, because allowing them to move would l
 silently repoint a live client — and every channel trusting it — at a different chain or a different
 contract. The contract refuses the migration and names the offending field if any of the five differ.
 
-It also refuses a substitute that is frozen, expired, or carries no quorum configuration.
+It also refuses a substitute that is frozen, expired, never expires (`max_consensus_age` of 0), or
+carries no quorum configuration.
 
 ## What is deliberately not supported
 

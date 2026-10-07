@@ -6,7 +6,7 @@ approves a binary nobody has read. This page is how a reviewer checks, and it sh
 ## The short version
 
 ```sh
-git clone --branch v0.1.1 https://github.com/ipsadev/stellar-light-client
+git clone --branch v<version> https://github.com/ipsadev/stellar-light-client
 cd stellar-light-client
 ./scripts/release-build.sh dist
 cat dist/checksums.txt
@@ -55,19 +55,10 @@ Compare against the uncompressed hash. To confirm a specific client instance is 
 gaiad q ibc client state 08-wasm-<n> --node <rpc>
 ```
 
-The client state carries the checksum it was instantiated against.
+The client state carries the checksum the client runs: the one it was instantiated against, or the
+one a later `migrate-contract` moved it to.
 
 ## If the checksums differ
 
 Do not work around it. A mismatch means the release does not describe its source, and that is worth
 reporting rather than patching locally. Include your platform, your Docker version, and both hashes.
-
-## Known gap
-
-The Soroban contracts in the same release are built with a pinned toolchain and `--locked`, but they
-do not go through this container and have not been verified to rebuild byte-identically across
-machines. Nothing stores them by checksum today, so no counterparty depends on it. It remains open.
-
-The release also currently publishes `stellar_mock_light_client.wasm`, whose proof verification
-returns `true` unconditionally. It exists for local development. **It must never be stored on any
-chain**, and it should not be read from `checksums.txt` by mistake.

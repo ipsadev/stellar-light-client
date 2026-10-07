@@ -25,6 +25,10 @@ use crate::{
     types::{ClientState, ConsensusState, Height as WireHeight, Misbehaviour, StellarHeader},
 };
 
+const STELLAR_REVISION_NUMBER: u64 = 0;
+
+const NANOS_PER_SECOND: u64 = 1_000_000_000;
+
 #[entry_point]
 pub fn instantiate(
     deps: DepsMut<'_>,
@@ -38,17 +42,22 @@ pub fn instantiate(
 
     let client_state = ClientState::decode(msg.client_state.as_slice())
         .map_err(|e| ContractError::InvalidWire(format!("client_state: {e}")))?;
-    let consensus_state = ConsensusState::decode(msg.consensus_state.as_slice())
+    let mut consensus_state = ConsensusState::decode(msg.consensus_state.as_slice())
         .map_err(|e| ContractError::InvalidWire(format!("consensus_state: {e}")))?;
-    let height = client_state
-        .latest_height
-        .as_ref()
-        .ok_or_else(|| ContractError::InvalidWire("client_state.latest_height".into()))?
-        .revision_height;
 
-    validate_quorum_configs(&client_state)?;
-    store::set_checksum(deps.storage, msg.checksum.as_slice());
-    store::set_client_state(deps.storage, &client_state);
+    let height = validate_client_state(&client_state)?;
+
+    validate_consensus_state(&consensus_state)?;
+
+    if client_state.frozen_height.is_some() {
+        return Err(ContractError::InvalidClientState(
+            "a new client cannot start frozen",
+        ));
+    }
+
+    consensus_state.generation = client_state.generation;
+
+    store::init_client_state(deps.storage, &client_state, msg.checksum.as_slice());
     store::set_consensus_state(deps.storage, height, &consensus_state);
 
     Ok(Response::default())
@@ -110,7 +119,8 @@ pub fn query(deps: Deps<'_>, env: Env, msg: QueryMsg) -> Result<Binary, Contract
             Ok(Binary::new(cs.encode_to_vec()))
         }
         QueryMsg::ConsensusState { height } => {
-            let cons = require_consensus_state(deps, height.revision_height)?;
+            let cs = require_client_state(deps)?;
+            let cons = require_consensus_state(deps, &cs, &height)?;
 
             Ok(Binary::new(cons.encode_to_vec()))
         }
@@ -138,21 +148,26 @@ pub fn query(deps: Deps<'_>, env: Env, msg: QueryMsg) -> Result<Binary, Contract
             to_json(&StatusResult { status })
         }
         QueryMsg::TimestampAtHeight { height } => {
-            let cons = require_consensus_state(deps, height.revision_height)?;
+            let cs = require_client_state(deps)?;
+            let cons = require_consensus_state(deps, &cs, &height)?;
+            let timestamp = cons.timestamp.checked_mul(NANOS_PER_SECOND).ok_or(
+                ContractError::TimestampOverflow {
+                    seconds: cons.timestamp,
+                },
+            )?;
 
-            to_json(&TimestampAtHeightResult {
-                timestamp: cons.timestamp,
-            })
+            to_json(&TimestampAtHeightResult { timestamp })
         }
         QueryMsg::VerifyClientMessage { client_message } => {
             verify_client_message(deps, client_message.as_slice())?;
             to_json(&cosmwasm_std::Empty {})
         }
         QueryMsg::CheckForMisbehaviour { client_message } => {
+            let cs = require_client_state(deps)?;
             let verified = verify_client_message(deps, client_message.as_slice())?;
 
             to_json(&CheckForMisbehaviourResult {
-                found_misbehaviour: detect_misbehaviour(deps, &verified),
+                found_misbehaviour: detect_misbehaviour(deps, &cs, &verified),
             })
         }
     }
@@ -172,23 +187,25 @@ fn migrate_client_store(deps: DepsMut<'_>, env: Env) -> Result<(), ContractError
         });
     }
 
-    validate_quorum_configs(&substitute)?;
-    let height = substitute
-        .latest_height
-        .as_ref()
-        .ok_or_else(|| ContractError::InvalidWire("substitute.latest_height".into()))?
-        .revision_height;
-    let consensus = store::consensus_state_prefixed(deps.storage, store::SUBSTITUTE_PREFIX, height)
-        .ok_or(ContractError::ConsensusStateMissing { height })?;
+    let height = validate_client_state(&substitute)?;
+    let mut consensus =
+        store::consensus_state_prefixed(deps.storage, store::SUBSTITUTE_PREFIX, height)
+            .ok_or(ContractError::ConsensusStateMissing { height })?;
 
-    if substitute.max_consensus_age != 0
-        && env.block.time.seconds()
-            > consensus
-                .timestamp
-                .saturating_add(substitute.max_consensus_age)
+    if env.block.time.seconds()
+        > consensus
+            .timestamp
+            .saturating_add(substitute.max_consensus_age)
     {
         return Err(ContractError::SubstituteExpired);
     }
+
+    let generation = subject
+        .generation
+        .checked_add(1)
+        .ok_or(ContractError::GenerationOverflow)?;
+
+    consensus.generation = generation;
 
     let migrated = ClientState {
         chain_id: subject.chain_id.clone(),
@@ -200,6 +217,7 @@ fn migrate_client_store(deps: DepsMut<'_>, env: Env) -> Result<(), ContractError
         max_consensus_age: substitute.max_consensus_age,
         router_contract_id: subject.router_contract_id.clone(),
         root_event_topic: subject.root_event_topic.clone(),
+        generation,
     };
 
     store::set_consensus_state_prefixed(deps.storage, store::SUBJECT_PREFIX, height, &consensus);
@@ -236,15 +254,11 @@ fn ensure_same_target(
 }
 
 fn is_expired(deps: Deps<'_>, env: &Env, cs: &ClientState) -> bool {
-    if cs.max_consensus_age == 0 {
-        return false;
-    }
-
     let Some(latest) = cs.latest_height.as_ref() else {
         return true;
     };
 
-    let Some(consensus) = store::consensus_state(deps.storage, latest.revision_height) else {
+    let Some(consensus) = current_consensus_state(deps, cs, latest.revision_height) else {
         return true;
     };
 
@@ -328,8 +342,14 @@ fn verify_header(
         .as_slice()
         .try_into()
         .map_err(|_| ContractError::NetworkIdInvalid)?;
+    let next_slot = header
+        .slot_index
+        .checked_add(1)
+        .ok_or(ContractError::SlotOverflow {
+            slot: header.slot_index,
+        })?;
     let local = applicable_quorum_set(cs, header.slot_index)?;
-    let local_next = applicable_quorum_set(cs, header.slot_index + 1)?;
+    let local_next = applicable_quorum_set(cs, next_slot)?;
     let verified = verify::verify(Inputs {
         network_id: &network_id,
         quorum_set_for_slot: &local,
@@ -367,14 +387,81 @@ fn verify_header(
     })
 }
 
-fn detect_misbehaviour(deps: Deps<'_>, verified: &Verified) -> bool {
+fn detect_misbehaviour(deps: Deps<'_>, cs: &ClientState, verified: &Verified) -> bool {
     match verified {
         Verified::Fork { .. } => true,
-        Verified::Header(h) => match store::consensus_state_ro(deps.storage, h.header.slot_index) {
+        Verified::Header(h) => match current_consensus_state(deps, cs, h.header.slot_index) {
             Some(existing) => existing.ledger_hash != h.header.ledger_hash.to_vec(),
             None => false,
         },
     }
+}
+
+fn validate_client_state(cs: &ClientState) -> Result<u64, ContractError> {
+    if cs.chain_id.is_empty() {
+        return Err(ContractError::InvalidClientState("chain_id is empty"));
+    }
+
+    let latest = cs
+        .latest_height
+        .as_ref()
+        .ok_or(ContractError::InvalidClientState(
+            "latest_height is missing",
+        ))?;
+
+    if latest.revision_number != STELLAR_REVISION_NUMBER {
+        return Err(ContractError::RevisionNumberUnsupported {
+            revision: latest.revision_number,
+        });
+    }
+
+    if latest.revision_height == 0 {
+        return Err(ContractError::InvalidClientState("latest_height is 0"));
+    }
+
+    if cs.network_id.len() != HASH_SIZE {
+        return Err(ContractError::NetworkIdInvalid);
+    }
+
+    if cs.router_contract_id.len() != HASH_SIZE {
+        return Err(ContractError::RouterContractIdMissing);
+    }
+
+    if cs.root_event_topic.is_empty() {
+        return Err(ContractError::InvalidClientState(
+            "root_event_topic is empty",
+        ));
+    }
+
+    if cs.max_consensus_age == 0 {
+        return Err(ContractError::InvalidClientState(
+            "max_consensus_age is 0, so the trust root would never expire",
+        ));
+    }
+
+    validate_quorum_configs(cs)?;
+
+    Ok(latest.revision_height)
+}
+
+fn validate_consensus_state(consensus: &ConsensusState) -> Result<(), ContractError> {
+    if consensus.timestamp == 0 {
+        return Err(ContractError::InvalidConsensusState("timestamp is 0"));
+    }
+
+    if consensus.ledger_hash.len() != HASH_SIZE {
+        return Err(ContractError::InvalidConsensusState(
+            "ledger_hash is not 32 bytes",
+        ));
+    }
+
+    if !consensus.root.is_empty() && consensus.root.len() != HASH_SIZE {
+        return Err(ContractError::InvalidConsensusState(
+            "root is neither empty nor 32 bytes",
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_quorum_configs(cs: &ClientState) -> Result<(), ContractError> {
@@ -443,18 +530,42 @@ fn update_state(
         timestamp: verified.header.timestamp,
         ledger_hash: verified.header.ledger_hash.to_vec(),
         root: verified.root.map(|r| r.to_vec()).unwrap_or_default(),
+        generation: cs.generation,
     };
 
-    if let Some(existing) = store::consensus_state(deps.storage, verified.header.slot_index) {
-        if existing != new_consensus {
+    let heights = vec![MsgHeight {
+        revision_number: STELLAR_REVISION_NUMBER,
+        revision_height: verified.header.slot_index,
+    }];
+
+    if let Some(existing) = current_consensus_state(deps.as_ref(), &cs, verified.header.slot_index)
+    {
+        let same_ledger = existing.ledger_hash == new_consensus.ledger_hash
+            && existing.timestamp == new_consensus.timestamp;
+
+        if !same_ledger {
             return Err(ContractError::ConsensusStateConflict {
                 height: verified.header.slot_index,
             });
         }
+
+        if new_consensus.root.is_empty() || existing.root == new_consensus.root {
+            return Ok(UpdateStateResult { heights });
+        }
+
+        if !existing.root.is_empty() {
+            return Err(ContractError::ConsensusStateConflict {
+                height: verified.header.slot_index,
+            });
+        }
+
+        store::set_consensus_state(deps.storage, verified.header.slot_index, &new_consensus);
+
+        return Ok(UpdateStateResult { heights });
     }
 
     if let Some(previous_slot) = verified.header.slot_index.checked_sub(1) {
-        if let Some(previous) = store::consensus_state(deps.storage, previous_slot) {
+        if let Some(previous) = current_consensus_state(deps.as_ref(), &cs, previous_slot) {
             if previous.ledger_hash != verified.header.previous_ledger_hash {
                 return Err(ContractError::PreviousLedgerMismatch {
                     slot: verified.header.slot_index,
@@ -473,7 +584,7 @@ fn update_state(
         .unwrap_or(0);
 
     if verified.header.slot_index > latest {
-        if let Some(previous) = store::consensus_state(deps.storage, latest) {
+        if let Some(previous) = current_consensus_state(deps.as_ref(), &cs, latest) {
             if verified.header.timestamp <= previous.timestamp {
                 return Err(ContractError::NonMonotonicCloseTime {
                     slot: verified.header.slot_index,
@@ -489,18 +600,13 @@ fn update_state(
 
     if verified.header.slot_index > latest {
         cs.latest_height = Some(WireHeight {
-            revision_number: 0,
+            revision_number: STELLAR_REVISION_NUMBER,
             revision_height: verified.header.slot_index,
         });
         store::set_client_state(deps.storage, &cs);
     }
 
-    Ok(UpdateStateResult {
-        heights: vec![MsgHeight {
-            revision_number: 0,
-            revision_height: verified.header.slot_index,
-        }],
-    })
+    Ok(UpdateStateResult { heights })
 }
 
 fn update_state_on_misbehaviour(
@@ -509,8 +615,9 @@ fn update_state_on_misbehaviour(
     msg: UpdateStateOnMisbehaviourMsg,
 ) -> Result<(), ContractError> {
     let verified = verify_client_message(deps.as_ref(), &msg.client_message)?;
+    let mut cs = require_client_state(deps.as_ref())?;
 
-    if !detect_misbehaviour(deps.as_ref(), &verified) {
+    if !detect_misbehaviour(deps.as_ref(), &cs, &verified) {
         return Err(ContractError::MisbehaviourNotAFork);
     }
 
@@ -519,10 +626,8 @@ fn update_state_on_misbehaviour(
         Verified::Header(h) => h.header.slot_index,
     };
 
-    let mut cs = require_client_state_mut(deps.as_ref())?;
-
     cs.frozen_height = Some(WireHeight {
-        revision_number: 0,
+        revision_number: STELLAR_REVISION_NUMBER,
         revision_height: at.max(1),
     });
     store::set_client_state(deps.storage, &cs);
@@ -546,7 +651,7 @@ fn check_for_misbehaviour(
     let verified = verify_client_message(deps.as_ref(), &msg.client_message)?;
 
     Ok(CheckForMisbehaviourResult {
-        found_misbehaviour: detect_misbehaviour(deps.as_ref(), &verified),
+        found_misbehaviour: detect_misbehaviour(deps.as_ref(), &cs, &verified),
     })
 }
 
@@ -555,7 +660,7 @@ fn verify_membership(
     _env: Env,
     msg: VerifyMembershipMsg,
 ) -> Result<(), ContractError> {
-    let cs = require_client_state_mut(deps.as_ref())?;
+    let cs = require_client_state(deps.as_ref())?;
 
     if let Some(h) = cs.frozen_height.as_ref() {
         return Err(ContractError::Frozen {
@@ -563,7 +668,9 @@ fn verify_membership(
         });
     }
 
-    let consensus = require_consensus_state(deps.as_ref(), msg.height.revision_height)?;
+    reject_delay(msg.delay_time_period, msg.delay_block_period)?;
+
+    let consensus = require_consensus_state(deps.as_ref(), &cs, &msg.height)?;
     let root: [u8; HASH_SIZE] =
         consensus
             .root
@@ -609,7 +716,7 @@ fn verify_non_membership(
     _env: Env,
     msg: VerifyNonMembershipMsg,
 ) -> Result<(), ContractError> {
-    let cs = require_client_state_mut(deps.as_ref())?;
+    let cs = require_client_state(deps.as_ref())?;
 
     if let Some(h) = cs.frozen_height.as_ref() {
         return Err(ContractError::Frozen {
@@ -617,7 +724,9 @@ fn verify_non_membership(
         });
     }
 
-    let consensus = require_consensus_state(deps.as_ref(), msg.height.revision_height)?;
+    reject_delay(msg.delay_time_period, msg.delay_block_period)?;
+
+    let consensus = require_consensus_state(deps.as_ref(), &cs, &msg.height)?;
     let root: [u8; HASH_SIZE] =
         consensus
             .root
@@ -659,13 +768,39 @@ fn require_client_state(deps: Deps<'_>) -> Result<ClientState, ContractError> {
     store::client_state(deps.storage).ok_or(ContractError::NotInitialised)
 }
 
-fn require_client_state_mut(deps: Deps<'_>) -> Result<ClientState, ContractError> {
-    require_client_state(deps)
+fn current_consensus_state(
+    deps: Deps<'_>,
+    cs: &ClientState,
+    height: u64,
+) -> Option<ConsensusState> {
+    store::consensus_state(deps.storage, height)
+        .filter(|consensus| consensus.generation == cs.generation)
 }
 
-fn require_consensus_state(deps: Deps<'_>, height: u64) -> Result<ConsensusState, ContractError> {
-    store::consensus_state(deps.storage, height)
-        .ok_or(ContractError::ConsensusStateMissing { height })
+fn require_consensus_state(
+    deps: Deps<'_>,
+    cs: &ClientState,
+    height: &MsgHeight,
+) -> Result<ConsensusState, ContractError> {
+    if height.revision_number != STELLAR_REVISION_NUMBER {
+        return Err(ContractError::RevisionNumberUnsupported {
+            revision: height.revision_number,
+        });
+    }
+
+    current_consensus_state(deps, cs, height.revision_height).ok_or(
+        ContractError::ConsensusStateMissing {
+            height: height.revision_height,
+        },
+    )
+}
+
+fn reject_delay(time: u64, blocks: u64) -> Result<(), ContractError> {
+    if time != 0 || blocks != 0 {
+        return Err(ContractError::DelayPeriodUnsupported { time, blocks });
+    }
+
+    Ok(())
 }
 
 fn to_json<T: serde::Serialize>(value: &T) -> Result<Binary, ContractError> {

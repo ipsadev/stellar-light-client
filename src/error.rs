@@ -164,6 +164,23 @@ pub enum ContractError {
     ChainBroken { sequence: u32, child: u32 },
     #[error("client state is missing the router contract id needed to bind the state root")]
     RouterContractIdMissing,
+    #[error("invalid client state: {0}")]
+    InvalidClientState(&'static str),
+    #[error("invalid consensus state: {0}")]
+    InvalidConsensusState(&'static str),
+    #[error("stellar has a single revision; revision number {revision} is not 0")]
+    RevisionNumberUnsupported { revision: u64 },
+    #[error(
+        "delay periods are not enforced by this client (time {time}, blocks {blocks}); use a \
+         connection or path with no delay"
+    )]
+    DelayPeriodUnsupported { time: u64, blocks: u64 },
+    #[error("slot {slot} has no successor slot")]
+    SlotOverflow { slot: u64 },
+    #[error("close time {seconds}s does not fit in nanoseconds")]
+    TimestampOverflow { seconds: u64 },
+    #[error("recovery would overflow the client generation")]
+    GenerationOverflow,
     #[error("header carries no state-root proof")]
     StateRootProofMissing,
     #[error("merkle proof verification failed")]
