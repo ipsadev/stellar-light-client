@@ -1208,9 +1208,9 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stellar-consensus-verifier"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47635ac44720787812ea5a1012e7e7b358ea4f48866c4807da1007f684595390"
+checksum = "1426fb198b6ebbab87031f6ed9d790f85c6002bcc8bfc72467dde7ad4b0bbf3d"
 dependencies = [
  "ed25519-dalek",
  "sha2",
@@ -1219,7 +1219,7 @@ dependencies = [
 
 [[package]]
 name = "stellar-light-client"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "cosmwasm-std",
  "cw-multi-test",
