@@ -21,7 +21,7 @@ thiserror = "1"
 stellar-consensus-verifier = "1.0.1"
 
 [dev-dependencies]
-ipsa-ibc-core = "0.1"
+ipsa = { version = "0.1", default-features = false, features = ["core"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 cw-multi-test = { version = "2", features = ["cosmwasm_2_1"] }
 
