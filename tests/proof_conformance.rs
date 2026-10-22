@@ -1,4 +1,4 @@
-use ipsa_ibc_core::{
+use ipsa::core::{
     proof::{serialize_membership_proof, serialize_non_membership_proof},
     smt::{MembershipProof, NonMembershipProof, Smt},
 };
