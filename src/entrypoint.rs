@@ -585,7 +585,7 @@ fn update_state(
 
     if verified.header.slot_index > latest {
         if let Some(previous) = current_consensus_state(deps.as_ref(), &cs, latest) {
-            if verified.header.timestamp <= previous.timestamp {
+            if verified.header.timestamp < previous.timestamp {
                 return Err(ContractError::NonMonotonicCloseTime {
                     slot: verified.header.slot_index,
                     close_time: verified.header.timestamp,

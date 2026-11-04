@@ -74,7 +74,7 @@ pub enum ContractError {
         found: String,
     },
     #[error(
-        "ledger {slot} closed at {close_time}, not after the trusted consensus state at {latest} \
+        "ledger {slot} closed at {close_time}, before the trusted consensus state at {latest} \
          (closed {previous})"
     )]
     NonMonotonicCloseTime {
