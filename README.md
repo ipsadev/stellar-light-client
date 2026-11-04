@@ -30,8 +30,7 @@ A header is accepted only when all of these hold:
    ledger's hash as its predecessor, which binds every other header field;
 5. the ledger follows the stored consensus state at the slot before it, when
    there is one;
-6. its close time is later than the latest trusted ledger's, when it advances
-   the client;
+6. its close time is not earlier than the latest trusted ledger's, when it advances the client. Since Protocol 30 two ledgers can close within the same second (CAP-88), so an equal second is accepted;
 7. when a state root is supplied, the transaction results hash to the header's
    `txSetResultHash`, the chosen transaction is a successful contract call, and
    it carries exactly one root event from the configured router.
@@ -82,6 +81,10 @@ Tests are grouped by the surface they cover. `tests/scp/` is one binary with
 `synthetic` checks and the `mainnet` / `testnet_chain` fixture replays; the rest
 are one binary each.
 Recorded ledgers live in `tests/fixtures/`.
+
+`tests/scp/` also replays testnet ledger 5541000, a Protocol 30 ledger whose agreed value records its close time in milliseconds (`StellarValue` kind 3), read with `stellar-consensus-verifier` 1.1.0.
+
+`just audit` ignores RUSTSEC-2026-0387 (`crypto-bigint` 0.5): it reaches the client only through `cosmwasm-std`'s secp256k1 code, which this client never calls; Stellar's signatures are Ed25519, checked with `ed25519-dalek`.
 
 ## Build
 

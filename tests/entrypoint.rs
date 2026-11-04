@@ -1035,6 +1035,23 @@ fn advancing_the_client_requires_time_to_move_forward() {
 }
 
 #[test]
+fn advancing_within_the_same_second_is_allowed() {
+    let mut deps = mock_dependencies();
+
+    do_instantiate(&mut deps);
+    let hdr = header_after(101, 1_000_000, LEDGER_HASH_INIT);
+
+    sudo(
+        deps.as_mut(),
+        mock_env(),
+        SudoMsg::UpdateState(UpdateStateMsg {
+            client_message: encode(&hdr),
+        }),
+    )
+    .expect("since Protocol 30 consecutive ledgers can close in the same second");
+}
+
+#[test]
 fn backfilling_an_older_slot_is_still_allowed() {
     let mut deps = mock_dependencies();
 

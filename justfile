@@ -34,7 +34,7 @@ test-filter pattern:
     cargo test --locked -- {{pattern}}
 
 audit:
-    cargo audit --file Cargo.lock
+    cargo audit --file Cargo.lock --ignore RUSTSEC-2026-0387
 
 # compile to wasm without the reproducibility pins; NOT the release artifact
 build-wasm:
