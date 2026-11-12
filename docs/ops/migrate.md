@@ -54,6 +54,15 @@ use states from the current generation, so nothing from a forked or stale branch
 - `root_event_topic`
 - `proof_specs`
 
+Recovery copies only the substitute's latest consensus state, not its history — the same as ibc-go's
+reference `07-tendermint` client, whose `CheckSubstituteAndUpdateState` copies the single state at the
+substitute's `LatestHeight`. The host copies nothing itself: `RecoverClient` hands the contract both
+stores and leaves all copying to `migrate_client_store`. So after a recovery there is no trusted
+consensus state below the substitute's latest height. A packet proof built against a pre-recovery
+height must be re-proven against a height at or after the substitute's latest, which a relayer reaches
+by updating the recovered client forward. This is a liveness consideration, not a safety one: the
+source chain still holds the commitment, so the proof can be rebuilt.
+
 **The split is deliberate and is the security property to review.** Quorum configuration must be able
 to change, because validator rotation is a reason a client needs recovery in the first place. Chain
 identity and the router contract must not, because allowing them to move would let a recovery

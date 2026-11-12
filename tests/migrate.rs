@@ -164,6 +164,44 @@ fn the_substitutes_consensus_state_is_copied_to_the_subject() {
 }
 
 #[test]
+fn recovery_copies_only_the_substitutes_latest_consensus_state() {
+    let mut deps = staged(
+        client_state(SUBJECT_HEIGHT, 0x01),
+        client_state(SUBSTITUTE_HEIGHT, 0x02),
+    );
+
+    let historical = SUBSTITUTE_HEIGHT - 400;
+
+    set_consensus_state_prefixed(
+        &mut deps.storage,
+        SUBSTITUTE_PREFIX,
+        historical,
+        &consensus(200, 0x33),
+    );
+
+    migrate(&mut deps).expect("migration should succeed");
+
+    assert!(
+        stellar_light_client::store::consensus_state_prefixed(
+            &deps.storage,
+            SUBJECT_PREFIX,
+            SUBSTITUTE_HEIGHT,
+        )
+        .is_some(),
+        "the substitute's latest consensus state is copied"
+    );
+    assert!(
+        stellar_light_client::store::consensus_state_prefixed(
+            &deps.storage,
+            SUBJECT_PREFIX,
+            historical,
+        )
+        .is_none(),
+        "a historical substitute consensus state is not backfilled, matching 07-tendermint"
+    );
+}
+
+#[test]
 fn a_substitute_tracking_another_chain_is_refused() {
     let mut substitute = client_state(SUBSTITUTE_HEIGHT, 0x02);
 
