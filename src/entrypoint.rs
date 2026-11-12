@@ -657,7 +657,7 @@ fn check_for_misbehaviour(
 
 fn verify_membership(
     deps: DepsMut<'_>,
-    _env: Env,
+    env: Env,
     msg: VerifyMembershipMsg,
 ) -> Result<(), ContractError> {
     let cs = require_client_state(deps.as_ref())?;
@@ -666,6 +666,10 @@ fn verify_membership(
         return Err(ContractError::Frozen {
             height: h.revision_height,
         });
+    }
+
+    if is_expired(deps.as_ref(), &env, &cs) {
+        return Err(ContractError::ClientExpired);
     }
 
     reject_delay(msg.delay_time_period, msg.delay_block_period)?;
@@ -713,7 +717,7 @@ fn verify_membership(
 
 fn verify_non_membership(
     deps: DepsMut<'_>,
-    _env: Env,
+    env: Env,
     msg: VerifyNonMembershipMsg,
 ) -> Result<(), ContractError> {
     let cs = require_client_state(deps.as_ref())?;
@@ -722,6 +726,10 @@ fn verify_non_membership(
         return Err(ContractError::Frozen {
             height: h.revision_height,
         });
+    }
+
+    if is_expired(deps.as_ref(), &env, &cs) {
+        return Err(ContractError::ClientExpired);
     }
 
     reject_delay(msg.delay_time_period, msg.delay_block_period)?;

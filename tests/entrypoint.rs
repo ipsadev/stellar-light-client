@@ -723,6 +723,91 @@ fn verify_non_membership_rejects_when_frozen() {
 }
 
 #[test]
+fn verify_membership_rejects_when_expired() {
+    let mut deps = mock_dependencies();
+    let info = message_info(&deps.api.addr_make("creator"), &[]);
+    let mut cs = fresh_client_state(100);
+
+    cs.max_consensus_age = 3600;
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        info,
+        InstantiateMsg {
+            client_state: encode(&cs),
+            consensus_state: encode(&fresh_consensus_state(
+                1_000_000,
+                LEDGER_HASH_INIT,
+                ROOT_INIT,
+            )),
+            checksum: Binary::default(),
+        },
+    )
+    .unwrap();
+    let err = sudo(
+        deps.as_mut(),
+        mock_env(),
+        SudoMsg::VerifyMembership(VerifyMembershipMsg {
+            height: MsgHeight {
+                revision_number: 0,
+                revision_height: 100,
+            },
+            delay_time_period: 0,
+            delay_block_period: 0,
+            proof: Binary::default(),
+            merkle_path: MerklePath {
+                key_path: vec![Binary::new(b"key".to_vec())],
+            },
+            value: Binary::new(b"value".to_vec()),
+        }),
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, ContractError::ClientExpired), "got {err:?}");
+}
+
+#[test]
+fn verify_non_membership_rejects_when_expired() {
+    let mut deps = mock_dependencies();
+    let info = message_info(&deps.api.addr_make("creator"), &[]);
+    let mut cs = fresh_client_state(100);
+
+    cs.max_consensus_age = 3600;
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        info,
+        InstantiateMsg {
+            client_state: encode(&cs),
+            consensus_state: encode(&fresh_consensus_state(
+                1_000_000,
+                LEDGER_HASH_INIT,
+                ROOT_INIT,
+            )),
+            checksum: Binary::default(),
+        },
+    )
+    .unwrap();
+    let err = sudo(
+        deps.as_mut(),
+        mock_env(),
+        SudoMsg::VerifyNonMembership(VerifyNonMembershipMsg {
+            height: MsgHeight {
+                revision_number: 0,
+                revision_height: 100,
+            },
+            delay_time_period: 0,
+            delay_block_period: 0,
+            proof: Binary::default(),
+            merkle_path: MerklePath { key_path: vec![] },
+        }),
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, ContractError::ClientExpired), "got {err:?}");
+}
+
+#[test]
 fn update_state_rejects_envelope_signed_against_different_network() {
     let mut deps = mock_dependencies();
 
@@ -1717,7 +1802,18 @@ fn consensus_states_from_before_a_recovery_are_not_trusted() {
     let mut cs = stellar_light_client::store::client_state(deps.as_ref().storage).unwrap();
 
     cs.generation = 1;
+    cs.latest_height = Some(WireHeight {
+        revision_number: 0,
+        revision_height: 200,
+    });
     stellar_light_client::store::set_client_state(deps.as_mut().storage, &cs);
+
+    let mut live =
+        fresh_consensus_state(mock_env().block.time.seconds(), LEDGER_HASH_INIT, ROOT_INIT);
+
+    live.generation = 1;
+    stellar_light_client::store::set_consensus_state(deps.as_mut().storage, 200, &live);
+
     let err = sudo(
         deps.as_mut(),
         mock_env(),
