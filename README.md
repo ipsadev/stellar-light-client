@@ -35,6 +35,16 @@ A header is accepted only when all of these hold:
    `txSetResultHash`, the chosen transaction is a successful contract call, and
    it carries exactly one root event from the configured router.
 
+A Stellar ledger can contain more than one router transaction, and the router
+publishes a fresh root after each one — every root over the same sparse Merkle
+tree, so each is cumulative over the commitments before it. The client binds one
+root per ledger height and treats a second, different root at that height as a
+conflict, so the canonical root for a ledger is the one its last router
+transaction published: it is the only root that covers every commitment the
+ledger made, and the one a relayer must prove. Binding an earlier transaction's
+root is refused once the canonical one is stored, and would in any case miss the
+commitments made later in the same ledger.
+
 Proofs are checked against a 64-level sparse Merkle tree keyed by the first 8
 bytes of `sha256(path)`, the tree the router maintains. The proofs travel in
 ICS-23 messages, but the tree is not an ICS-23 spec, and `proof_specs` in the

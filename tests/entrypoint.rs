@@ -1414,6 +1414,114 @@ fn two_router_roots_in_one_invocation_are_ambiguous() {
     assert!(matches!(err, ContractError::AmbiguousRouterEvent));
 }
 
+fn shared_ledger_header(
+    slot: u64,
+    pairs: &[Vec<u8>],
+    tx_set_result_hash: [u8; 32],
+    result_index: u32,
+    preimage: Vec<u8>,
+) -> StellarHeader {
+    let close_time = 1_700_000_000 + slot;
+    let qset = quorum_config();
+    let qset_hash: [u8; 32] = Sha256::digest(&qset).into();
+    let value = stellar_value_xdr(close_time);
+    let header_xdr = ledger_header_with_results(slot as u32, &value, tx_set_result_hash);
+    let ledger_hash: [u8; 32] = Sha256::digest(&header_xdr).into();
+    let next_tx_set = tx_set_xdr(ledger_hash);
+    let next_tx_set_hash: [u8; 32] = Sha256::digest(&next_tx_set).into();
+    let mut next_value = next_tx_set_hash.to_vec();
+
+    next_value.extend_from_slice(&(close_time + 5).to_be_bytes());
+    next_value.extend_from_slice(&u32be(0));
+    next_value.extend_from_slice(&u32be(0));
+
+    StellarHeader {
+        slot_index: slot,
+        ledger_header_xdr: header_xdr,
+        scp_envelopes: validators()
+            .iter()
+            .map(|k| envelope_xdr(k, slot, &value, qset_hash))
+            .collect(),
+        quorum_sets_xdr: vec![qset],
+        next_scp_envelopes: validators()
+            .iter()
+            .map(|k| envelope_xdr(k, slot + 1, &next_value, qset_hash))
+            .collect(),
+        next_tx_set_xdr: next_tx_set,
+        state_root_proof: Some(stellar_light_client::types::StateRootProof {
+            result_pairs: pairs.to_vec(),
+            result_index,
+            success_preimage_xdr: preimage,
+        }),
+    }
+}
+
+#[test]
+fn two_router_transactions_in_one_ledger_make_the_last_root_canonical() {
+    let mut deps = mock_dependencies();
+
+    instantiate_with_router(&mut deps);
+
+    let root_first = [0xa1; 32];
+    let root_last = [0xb2; 32];
+    let preimage_first = success_preimage(&[contract_event(
+        &ROUTER_ID,
+        ROOT_TOPIC,
+        &scval_bytes(&root_first),
+    )]);
+    let preimage_last = success_preimage(&[contract_event(
+        &ROUTER_ID,
+        ROOT_TOPIC,
+        &scval_bytes(&root_last),
+    )]);
+    let hash_first: [u8; 32] = Sha256::digest(&preimage_first).into();
+    let hash_last: [u8; 32] = Sha256::digest(&preimage_last).into();
+
+    let pairs = vec![
+        invoke_result_pair([0x11; 32], [0x99; 32]),
+        invoke_result_pair([0x22; 32], hash_first),
+        invoke_result_pair([0x33; 32], hash_last),
+    ];
+    let mut hasher = Sha256::new();
+
+    hasher.update(u32be(pairs.len() as u32));
+    for p in &pairs {
+        hasher.update(p);
+    }
+
+    let tx_set_result_hash: [u8; 32] = hasher.finalize().into();
+
+    push_header(
+        &mut deps,
+        &shared_ledger_header(105, &pairs, tx_set_result_hash, 2, preimage_last.clone()),
+    )
+    .expect("the last router transaction's root binds");
+    let cons = stellar_light_client::store::consensus_state(deps.as_ref().storage, 105).unwrap();
+
+    assert_eq!(
+        cons.root,
+        root_last.to_vec(),
+        "the last router transaction in the ledger is the canonical root"
+    );
+
+    push_header(
+        &mut deps,
+        &shared_ledger_header(105, &pairs, tx_set_result_hash, 2, preimage_last),
+    )
+    .expect("re-binding the same canonical root from the same ledger is idempotent");
+
+    let err = push_header(
+        &mut deps,
+        &shared_ledger_header(105, &pairs, tx_set_result_hash, 1, preimage_first),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, ContractError::ConsensusStateConflict { height: 105 }),
+        "an earlier transaction's root in the same ledger must conflict: {err}"
+    );
+}
+
 #[test]
 fn a_tampered_result_set_breaks_the_binding() {
     let mut deps = mock_dependencies();
