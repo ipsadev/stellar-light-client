@@ -2,6 +2,7 @@ use cosmwasm_std::{
     entry_point, to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdError,
 };
 use prost::Message;
+use stellar_consensus_verifier::verify::{verify_router_root, TrustRoot};
 
 use crate::{
     error::ContractError,
@@ -12,11 +13,7 @@ use crate::{
         TimestampAtHeightResult, UpdateStateMsg, UpdateStateOnMisbehaviourMsg, UpdateStateResult,
         VerifyMembershipMsg, VerifyNonMembershipMsg,
     },
-    scp::{
-        quorum::QuorumSet,
-        results,
-        verify::{self, Inputs, VerifiedHeader},
-    },
+    scp::verify::{self, Inputs, VerifiedHeader},
     smt::{
         fold_siblings, key_index, leaf_hash, sha256, verify_non_membership_raw, HASH_SIZE,
         TREE_DEPTH,
@@ -376,12 +373,12 @@ fn verify_header(
         });
     }
 
-    let local = applicable_quorum_set(cs, header.slot_index)?;
-    let local_next = applicable_quorum_set(cs, next_slot)?;
+    let local = applicable_trust_root(cs, header.slot_index)?;
+    let local_next = applicable_trust_root(cs, next_slot)?;
     let verified = verify::verify(Inputs {
         network_id: &network_id,
-        quorum_set_for_slot: &local,
-        quorum_set_for_next_slot: &local_next,
+        trust_root_for_slot: &local,
+        trust_root_for_next_slot: &local_next,
         slot_index: header.slot_index,
         ledger_header_xdr: &header.ledger_header_xdr,
         envelopes_xdr: &header.scp_envelopes,
@@ -398,17 +395,17 @@ fn verify_header(
                 .try_into()
                 .map_err(|_| ContractError::RouterContractIdMissing)?;
 
-            let root = results::verify_state_root(&results::Inputs {
-                tx_set_result_hash: &verified.tx_set_result_hash,
-                result_pairs: &proof.result_pairs,
-                result_index: proof.result_index,
-                success_preimage_xdr: &proof.success_preimage_xdr,
-                router_contract_id: &router,
-                root_event_topic: &cs.root_event_topic,
-            })?;
+            let verified_root = verify_router_root(
+                &verified.authenticated,
+                &proof.result_pairs,
+                proof.result_index,
+                &proof.success_preimage_xdr,
+                &router,
+                &cs.root_event_topic,
+            )?;
 
             Some(BoundRoot {
-                root,
+                root: *verified_root.root(),
                 result_index: proof.result_index,
             })
         }
@@ -512,7 +509,7 @@ fn validate_quorum_configs(cs: &ClientState) -> Result<(), ContractError> {
             });
         }
 
-        QuorumSet::decode(&config.quorum_set_xdr)?.check_sane(true)?;
+        verify::trust_root(&config.quorum_set_xdr)?;
     }
 
     Ok(())
@@ -533,7 +530,7 @@ fn active_trust_root_start(cs: &ClientState) -> u64 {
         .unwrap_or(0)
 }
 
-fn applicable_quorum_set(cs: &ClientState, slot: u64) -> Result<QuorumSet, ContractError> {
+fn applicable_trust_root(cs: &ClientState, slot: u64) -> Result<TrustRoot, ContractError> {
     let mut applicable = cs.quorum_configs.iter().filter(|c| c.valid_from <= slot);
     let mut chosen = applicable
         .next()
@@ -551,11 +548,7 @@ fn applicable_quorum_set(cs: &ClientState, slot: u64) -> Result<QuorumSet, Contr
         }
     }
 
-    let qset = QuorumSet::decode(&chosen.quorum_set_xdr)?;
-
-    qset.check_sane(true)?;
-
-    Ok(qset)
+    verify::trust_root(&chosen.quorum_set_xdr)
 }
 
 fn update_state(

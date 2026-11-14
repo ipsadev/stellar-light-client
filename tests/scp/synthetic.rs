@@ -1,16 +1,17 @@
+use stellar_consensus_verifier::verify::TrustRoot;
 use stellar_light_client::scp::{
     envelope::Envelope,
     quorum::{is_quorum, is_quorum_slice, QuorumSet},
-    verify::{verify, Inputs},
+    verify::{trust_root, verify, Inputs},
 };
 
 use crate::common::{build_ledger, nested_quorum_set, public_of, quorum_set, sha256, signing_key};
 
-fn run(l: &crate::common::Ledger, local: &QuorumSet, slot: u64) -> Result<(), String> {
+fn run(l: &crate::common::Ledger, local: &TrustRoot, slot: u64) -> Result<(), String> {
     verify(Inputs {
         network_id: &l.network_id,
-        quorum_set_for_slot: local,
-        quorum_set_for_next_slot: local,
+        trust_root_for_slot: local,
+        trust_root_for_next_slot: local,
         slot_index: slot,
         ledger_header_xdr: &l.header_xdr,
         envelopes_xdr: &l.envelopes,
@@ -22,8 +23,8 @@ fn run(l: &crate::common::Ledger, local: &QuorumSet, slot: u64) -> Result<(), St
     .map_err(|e| format!("{e}"))
 }
 
-fn local_of(l: &crate::common::Ledger) -> QuorumSet {
-    QuorumSet::decode(&l.quorum_sets[0]).unwrap()
+fn local_of(l: &crate::common::Ledger) -> TrustRoot {
+    trust_root(&l.quorum_sets[0]).unwrap()
 }
 
 #[test]
@@ -42,8 +43,8 @@ fn a_tampered_ballot_counter_is_refused_before_the_signature_check() {
     envelopes[0][counter_offset..counter_offset + 4].copy_from_slice(&9u32.to_be_bytes());
     let err = verify(Inputs {
         network_id: &l.network_id,
-        quorum_set_for_slot: &local_of(&l),
-        quorum_set_for_next_slot: &local_of(&l),
+        trust_root_for_slot: &local_of(&l),
+        trust_root_for_next_slot: &local_of(&l),
         slot_index: 101,
         ledger_header_xdr: &l.header_xdr,
         envelopes_xdr: &envelopes,
@@ -74,8 +75,8 @@ fn a_tampered_highest_confirmed_counter_fails_the_signature_check() {
     envelopes[0][highest_offset..highest_offset + 4].copy_from_slice(&9u32.to_be_bytes());
     let err = verify(Inputs {
         network_id: &l.network_id,
-        quorum_set_for_slot: &local_of(&l),
-        quorum_set_for_next_slot: &local_of(&l),
+        trust_root_for_slot: &local_of(&l),
+        trust_root_for_next_slot: &local_of(&l),
         slot_index: 101,
         ledger_header_xdr: &l.header_xdr,
         envelopes_xdr: &envelopes,
@@ -157,7 +158,7 @@ fn rebuild(l: &crate::common::Ledger) -> crate::common::Ledger {
 fn rejects_signers_outside_the_configured_set() {
     let l = build_ledger(103, 4, 3);
     let strangers: Vec<[u8; 32]> = (10..14).map(|i| public_of(&signing_key(i))).collect();
-    let other = QuorumSet::decode(&quorum_set(&strangers, 3)).unwrap();
+    let other = trust_root(&quorum_set(&strangers, 3)).unwrap();
     let err = run(&l, &other, 103).unwrap_err();
 
     assert!(err.contains("confirm commit"), "unexpected: {err}");

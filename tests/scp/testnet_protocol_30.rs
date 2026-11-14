@@ -1,8 +1,5 @@
 use serde::Deserialize;
-use stellar_light_client::scp::{
-    quorum::QuorumSet,
-    verify::{verify, Inputs, VerifiedHeader},
-};
+use stellar_light_client::scp::verify::{trust_root, verify, Inputs, VerifiedHeader};
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -32,7 +29,7 @@ fn fixture() -> Fixture {
 
 fn run(f: &Fixture, header: &[u8]) -> Result<VerifiedHeader, String> {
     let network_id: [u8; 32] = unhex(&f.network_id).try_into().unwrap();
-    let local = QuorumSet::decode(&unhex(&f.quorum_sets_xdr[0])).unwrap();
+    let local = trust_root(&unhex(&f.quorum_sets_xdr[0])).unwrap();
     let envelopes: Vec<Vec<u8>> = f.envelopes_xdr.iter().map(|e| unhex(e)).collect();
     let next_envelopes: Vec<Vec<u8>> = f.next_envelopes_xdr.iter().map(|e| unhex(e)).collect();
     let quorum_sets: Vec<Vec<u8>> = f.quorum_sets_xdr.iter().map(|q| unhex(q)).collect();
@@ -40,8 +37,8 @@ fn run(f: &Fixture, header: &[u8]) -> Result<VerifiedHeader, String> {
 
     verify(Inputs {
         network_id: &network_id,
-        quorum_set_for_slot: &local,
-        quorum_set_for_next_slot: &local,
+        trust_root_for_slot: &local,
+        trust_root_for_next_slot: &local,
         slot_index: f.ledger_seq,
         ledger_header_xdr: header,
         envelopes_xdr: &envelopes,
