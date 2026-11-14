@@ -1419,7 +1419,7 @@ fn the_routers_event_is_still_honoured_inside_another_contracts_invocation() {
 }
 
 #[test]
-fn two_router_roots_in_one_invocation_are_ambiguous() {
+fn two_router_roots_in_one_invocation_bind_the_last() {
     let mut deps = mock_dependencies();
 
     instantiate_with_router(&mut deps);
@@ -1430,9 +1430,62 @@ fn two_router_roots_in_one_invocation_are_ambiguous() {
             contract_event(&ROUTER_ID, ROOT_TOPIC, &scval_bytes(&[0x02; 32])),
         ],
     );
-    let err = push_header(&mut deps, &hdr).unwrap_err();
 
-    assert!(matches!(err, ContractError::AmbiguousRouterEvent));
+    push_header(&mut deps, &hdr).expect("the invocation's last root binds");
+
+    assert_eq!(
+        stored_at(&deps, 105).root,
+        vec![0x02; 32],
+        "the router's state when the invocation ended"
+    );
+}
+
+fn fee_bump_result_pair(success_hash: [u8; 32]) -> Vec<u8> {
+    let mut out = [0x44; 32].to_vec();
+
+    out.extend_from_slice(&200u64.to_be_bytes()); // outer feeCharged
+    out.extend_from_slice(&u32be(1)); // txFEE_BUMP_INNER_SUCCESS
+    out.extend_from_slice(&[0x55; 32]); // inner transaction hash
+    out.extend_from_slice(&100u64.to_be_bytes()); // inner feeCharged
+    out.extend_from_slice(&u32be(0)); // txSUCCESS
+    out.extend_from_slice(&u32be(1)); // one operation result
+    out.extend_from_slice(&u32be(0)); // opINNER
+    out.extend_from_slice(&u32be(24)); // INVOKE_HOST_FUNCTION
+    out.extend_from_slice(&u32be(0)); // INVOKE_HOST_FUNCTION_SUCCESS
+    out.extend_from_slice(&success_hash);
+    out.extend_from_slice(&u32be(0)); // InnerTransactionResult ext
+    out.extend_from_slice(&u32be(0)); // TransactionResult ext
+    out
+}
+
+#[test]
+fn a_fee_bumped_router_transaction_binds_its_root() {
+    let mut deps = mock_dependencies();
+    let root = [0x6e; 32];
+    let preimage = success_preimage(&[contract_event(&ROUTER_ID, ROOT_TOPIC, &scval_bytes(&root))]);
+    let success_hash: [u8; 32] = Sha256::digest(&preimage).into();
+    let pairs = vec![
+        invoke_result_pair([0x11; 32], [0x99; 32]),
+        fee_bump_result_pair(success_hash),
+    ];
+    let mut hasher = Sha256::new();
+
+    hasher.update(u32be(pairs.len() as u32));
+
+    for p in &pairs {
+        hasher.update(p);
+    }
+
+    let tx_set_result_hash: [u8; 32] = hasher.finalize().into();
+
+    instantiate_with_router(&mut deps);
+    push_header(
+        &mut deps,
+        &shared_ledger_header(105, &pairs, tx_set_result_hash, 1, preimage),
+    )
+    .expect("a sponsored router transaction proves its root");
+
+    assert_eq!(stored_at(&deps, 105).root, root.to_vec());
 }
 
 fn shared_ledger_header(

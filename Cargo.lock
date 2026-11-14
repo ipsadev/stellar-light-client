@@ -1092,13 +1092,13 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stellar-consensus-verifier"
-version = "1.1.1"
+version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9da06c61b6d07a4ab8338f66f3cb0f67839f9589700da6ca8fe01e6acbcb98c6"
+checksum = "826e6d63237460185c48f23bdca5162f45cb6fe869a77fd7363897e77ad4ac25"
 dependencies = [
  "ed25519-dalek",
  "sha2",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

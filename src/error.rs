@@ -158,8 +158,16 @@ pub enum ContractError {
     StateRootNotBound { height: u64 },
     #[error("transaction set does not hash to the value agreed for the next slot")]
     TxSetHashMismatch,
-    #[error("next slot's transaction set does not follow this ledger")]
-    LedgerNotPrevious,
+    #[error("the successor is ledger {found}, not the {expected} that would follow")]
+    SuccessorNotNext { expected: u64, found: u64 },
+    #[error("the header and its successor are from different networks")]
+    NetworkMismatch,
+    #[error("no ballot-protocol evidence was supplied; every envelope was a nomination")]
+    NoBallotEvidence,
+    #[error("the quorum set does not match the pinned trust-root fingerprint")]
+    TrustRootFingerprintMismatch,
+    #[error("input too large: {what} exceeds the limit of {limit}")]
+    InputTooLarge { what: &'static str, limit: usize },
     #[error("supplied transaction results do not hash to the header's txSetResultHash")]
     TxResultSetMismatch,
     #[error("result_index {index} is out of range for {len} result(s)")]
@@ -283,6 +291,17 @@ impl From<stellar_consensus_verifier::error::ScpError> for ContractError {
                 sequence: seq,
                 child,
             },
+            E::NoBallotEvidence => Self::NoBallotEvidence,
+            E::HeaderValueMismatch => Self::ValueNotThisLedger,
+            E::HeaderSlotMismatch { expected, found } => Self::SlotMismatch {
+                header: found,
+                claimed: expected,
+            },
+            E::SuccessorNotNext { expected, found } => Self::SuccessorNotNext { expected, found },
+            E::SuccessorTxSetMismatch => Self::TxSetHashMismatch,
+            E::NetworkMismatch => Self::NetworkMismatch,
+            E::TrustRootFingerprintMismatch => Self::TrustRootFingerprintMismatch,
+            E::InputTooLarge { what, limit } => Self::InputTooLarge { what, limit },
         }
     }
 }

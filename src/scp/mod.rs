@@ -1,5 +1,11 @@
 pub use stellar_consensus_verifier::{
-    ballot, envelope, error, ledger, quorum, results, txset, xdr,
+    error,
+    primitives::{
+        execution::results,
+        scp::{ballot, envelope, quorum},
+        stellar::{header as ledger, txset},
+    },
+    xdr,
 };
 
 pub mod verify;

@@ -1,8 +1,5 @@
 use serde::Deserialize;
-use stellar_light_client::scp::{
-    quorum::QuorumSet,
-    verify::{verify, Inputs},
-};
+use stellar_light_client::scp::verify::{trust_root, verify, Inputs};
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -31,7 +28,7 @@ fn fixture() -> Fixture {
 
 struct Case {
     network_id: [u8; 32],
-    local: QuorumSet,
+    local: stellar_consensus_verifier::verify::TrustRoot,
     header: Vec<u8>,
     envelopes: Vec<Vec<u8>>,
     next_envelopes: Vec<Vec<u8>>,
@@ -42,7 +39,7 @@ struct Case {
 fn case(f: &Fixture) -> Case {
     Case {
         network_id: unhex(&f.network_id).try_into().unwrap(),
-        local: QuorumSet::decode(&unhex(&f.quorum_sets_xdr[0])).unwrap(),
+        local: trust_root(&unhex(&f.quorum_sets_xdr[0])).unwrap(),
         header: unhex(&f.ledger_header_xdr),
         envelopes: f.envelopes_xdr.iter().map(|e| unhex(e)).collect(),
         next_envelopes: f.next_envelopes_xdr.iter().map(|e| unhex(e)).collect(),
@@ -54,8 +51,8 @@ fn case(f: &Fixture) -> Case {
 fn run(c: &Case, slot: u64) -> Result<stellar_light_client::scp::verify::VerifiedHeader, String> {
     verify(Inputs {
         network_id: &c.network_id,
-        quorum_set_for_slot: &c.local,
-        quorum_set_for_next_slot: &c.local,
+        trust_root_for_slot: &c.local,
+        trust_root_for_next_slot: &c.local,
         slot_index: slot,
         ledger_header_xdr: &c.header,
         envelopes_xdr: &c.envelopes,
@@ -97,7 +94,7 @@ fn rejects_a_forged_tx_set_result_hash() {
     let err = run(&c, f.ledger_seq).unwrap_err();
 
     assert!(
-        err.contains("does not follow this ledger"),
+        err.contains("does not hash to the previousLedgerHash"),
         "forging an unsigned header field must break the tx-set link: {err}"
     );
 }
@@ -136,5 +133,8 @@ fn rejects_a_missing_next_slot() {
     c.next_envelopes.clear();
     let err = run(&c, f.ledger_seq).unwrap_err();
 
-    assert!(err.contains("confirm commit"), "unexpected: {err}");
+    assert!(
+        err.contains("no ballot-protocol evidence"),
+        "unexpected: {err}"
+    );
 }

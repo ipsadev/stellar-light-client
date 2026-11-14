@@ -33,9 +33,7 @@ A header is accepted only when all of these hold:
    there is one;
 7. its close time is not earlier than the latest trusted ledger's, when it advances the client. Since Protocol 30 two ledgers can close within the same second (CAP-88), so an equal second is accepted;
 8. its close time is not later than the latest trusted ledger's, when it fills in a slot below the latest;
-9. when a state root is supplied, the transaction results hash to the header's
-   `txSetResultHash`, the chosen transaction is a successful contract call, and
-   it carries exactly one root event from the configured router.
+9. when a state root is supplied, the transaction results hash to the header's `txSetResultHash`, the chosen transaction is a successful contract call, directly or as the inner transaction of a fee-bump, and it carries at least one root event from the configured router. The last of them is bound: the success preimage holds only events from calls that succeeded, in the order they were emitted, so the last root is the router's state when the invocation ended.
 
 A Stellar ledger can contain more than one router transaction, and the router publishes a fresh root after each one, every root over the same sparse Merkle tree, so each is cumulative over the commitments before it. The canonical root for a ledger is the one its last router transaction published: it is the only root that covers every commitment the ledger made, and the one a relayer must prove.
 
@@ -95,7 +93,7 @@ Tests are grouped by the surface they cover. `tests/scp/` is one binary with
 are one binary each.
 Recorded ledgers live in `tests/fixtures/`.
 
-`tests/scp/` also replays testnet ledger 5541000, a Protocol 30 ledger whose agreed value records its close time in milliseconds (`StellarValue` kind 3), read with `stellar-consensus-verifier` 1.1.0.
+`tests/scp/` also replays testnet ledger 5541000, a Protocol 30 ledger whose agreed value records its close time in milliseconds (`StellarValue` kind 3), read with `stellar-consensus-verifier` 2.3.0.
 
 `just audit` ignores RUSTSEC-2026-0387 (`crypto-bigint` 0.5): it reaches the client only through `cosmwasm-std`'s secp256k1 code, which this client never calls; Stellar's signatures are Ed25519, checked with `ed25519-dalek`.
 
