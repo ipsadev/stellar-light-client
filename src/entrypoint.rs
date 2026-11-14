@@ -68,6 +68,7 @@ pub fn instantiate(
     }
 
     consensus_state.root.clear();
+    consensus_state.root_result_index = None;
     consensus_state.generation = client_state.generation;
 
     store::init_client_state(deps.storage, &client_state, msg.checksum.as_slice());
@@ -283,9 +284,14 @@ enum ClientMessage {
     Fork(Box<StellarHeader>, Box<StellarHeader>),
 }
 
+pub struct BoundRoot {
+    pub root: [u8; 32],
+    pub result_index: u32,
+}
+
 pub struct VerifiedLedger {
     pub header: VerifiedHeader,
-    pub root: Option<[u8; 32]>,
+    pub root: Option<BoundRoot>,
 }
 
 pub enum Verified {
@@ -392,14 +398,19 @@ fn verify_header(
                 .try_into()
                 .map_err(|_| ContractError::RouterContractIdMissing)?;
 
-            Some(results::verify_state_root(&results::Inputs {
+            let root = results::verify_state_root(&results::Inputs {
                 tx_set_result_hash: &verified.tx_set_result_hash,
                 result_pairs: &proof.result_pairs,
                 result_index: proof.result_index,
                 success_preimage_xdr: &proof.success_preimage_xdr,
                 router_contract_id: &router,
                 root_event_topic: &cs.root_event_topic,
-            })?)
+            })?;
+
+            Some(BoundRoot {
+                root,
+                result_index: proof.result_index,
+            })
         }
     };
 
@@ -566,8 +577,13 @@ fn update_state(
     let new_consensus = ConsensusState {
         timestamp: verified.header.timestamp,
         ledger_hash: verified.header.ledger_hash.to_vec(),
-        root: verified.root.map(|r| r.to_vec()).unwrap_or_default(),
+        root: verified
+            .root
+            .as_ref()
+            .map(|bound| bound.root.to_vec())
+            .unwrap_or_default(),
         generation: cs.generation,
+        root_result_index: verified.root.as_ref().map(|bound| bound.result_index),
     };
 
     let heights = vec![MsgHeight {
@@ -586,17 +602,9 @@ fn update_state(
             });
         }
 
-        if new_consensus.root.is_empty() || existing.root == new_consensus.root {
-            return Ok(UpdateStateResult { heights });
+        if root_moves_forward(&existing, &new_consensus, verified.header.slot_index)? {
+            store::set_consensus_state(deps.storage, verified.header.slot_index, &new_consensus);
         }
-
-        if !existing.root.is_empty() {
-            return Err(ContractError::ConsensusStateConflict {
-                height: verified.header.slot_index,
-            });
-        }
-
-        store::set_consensus_state(deps.storage, verified.header.slot_index, &new_consensus);
 
         return Ok(UpdateStateResult { heights });
     }
@@ -657,6 +665,37 @@ fn update_state(
     }
 
     Ok(UpdateStateResult { heights })
+}
+
+fn root_moves_forward(
+    existing: &ConsensusState,
+    offered: &ConsensusState,
+    height: u64,
+) -> Result<bool, ContractError> {
+    let Some(offered_index) = offered.root_result_index else {
+        return Ok(false);
+    };
+
+    if offered.root.is_empty() {
+        return Ok(false);
+    }
+
+    if existing.root.is_empty() {
+        return Ok(true);
+    }
+
+    match existing.root_result_index {
+        Some(stored_index) if offered_index > stored_index => Ok(true),
+        _ if existing.root == offered.root => Ok(false),
+        Some(stored_index) if offered_index < stored_index => {
+            Err(ContractError::RootSupersededInLedger {
+                height,
+                stored_index,
+                offered_index,
+            })
+        }
+        _ => Err(ContractError::ConsensusStateConflict { height }),
+    }
 }
 
 fn update_state_on_misbehaviour(

@@ -61,6 +61,8 @@ pub struct ConsensusState {
     pub root: alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "4")]
     pub generation: u64,
+    #[prost(uint32, optional, tag = "5")]
+    pub root_result_index: ::core::option::Option<u32>,
 }
 
 #[derive(Clone, PartialEq, Eq, Message, Serialize, Deserialize)]

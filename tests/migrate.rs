@@ -58,6 +58,7 @@ fn consensus(seconds_ago: u64, seed: u8) -> ConsensusState {
         ledger_hash: vec![seed; 32],
         root: vec![seed ^ 0xff; 32],
         generation: 0,
+        root_result_index: None,
     }
 }
 

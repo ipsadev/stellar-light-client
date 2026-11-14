@@ -37,15 +37,9 @@ A header is accepted only when all of these hold:
    `txSetResultHash`, the chosen transaction is a successful contract call, and
    it carries exactly one root event from the configured router.
 
-A Stellar ledger can contain more than one router transaction, and the router
-publishes a fresh root after each one — every root over the same sparse Merkle
-tree, so each is cumulative over the commitments before it. The client binds one
-root per ledger height and treats a second, different root at that height as a
-conflict, so the canonical root for a ledger is the one its last router
-transaction published: it is the only root that covers every commitment the
-ledger made, and the one a relayer must prove. Binding an earlier transaction's
-root is refused once the canonical one is stored, and would in any case miss the
-commitments made later in the same ledger.
+A Stellar ledger can contain more than one router transaction, and the router publishes a fresh root after each one, every root over the same sparse Merkle tree, so each is cumulative over the commitments before it. The canonical root for a ledger is the one its last router transaction published: it is the only root that covers every commitment the ledger made, and the one a relayer must prove.
+
+The client stores one root per ledger height, together with the index of the transaction result that published it, and lets that root move forward within the ledger: a root from a later result replaces the stored one, and a root from an earlier result is refused as superseded. Binding an earlier transaction's root first therefore cannot block the canonical one. Result order is apply order for router transactions: stellar-core applies the result set's stages one after another, and refuses a transaction set whose parallel clusters share a read-write key, which every root-publishing router call does. A root stored before result indexes were kept has no known position, so a different root for that ledger is refused as a conflict.
 
 Proofs are checked against a 64-level sparse Merkle tree keyed by the first 8
 bytes of `sha256(path)`, the tree the router maintains. The proofs travel in
@@ -64,7 +58,9 @@ The client refuses rather than ignores what it cannot honour:
 | a header below the `valid_from` of the configuration in force at the latest height | refused, including as misbehaviour evidence |
 | a header with no state root, for a ledger already stored with one | accepted as a no-op |
 | the same ledger with a root, after a root-less update | the root is added |
-| a different ledger, or a different root, for a stored slot | refused |
+| a root from a later transaction result in a ledger already stored with a root | the root moves forward to it |
+| a different root from an earlier transaction result in that ledger | refused as superseded |
+| a different ledger for a stored slot | refused |
 
 The initial consensus state is the one part of the trust root that no SCP evidence backs, so instantiate trusts as little of it as it can. It drops any root the state carries, and the first verified header for that slot binds one. It refuses a close time more than 600 seconds ahead of the block time, which would otherwise stop the client from ever advancing or expiring. Its ledger hash is still taken as given: if it is wrong, the real header for that slot is misbehaviour evidence and anyone can freeze the client with it.
 
