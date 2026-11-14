@@ -1,50 +1,36 @@
 # Stellar Light Client for `08-wasm`
 
-The Stellar light client, compiled to `wasm32-unknown-unknown` and loaded by a
-Cosmos SDK chain through [`08-wasm`](https://github.com/cosmos/ibc-go/tree/main/modules/light-clients/08-wasm).
-It verifies that a quorum of a trusted set of Stellar validators confirmed a
-ledger, binds that ledger to the state root published by an IBC router contract,
-and checks membership and non-membership proofs against that root, inside the
-consuming chain's own state machine.
+A light client that lets a Cosmos SDK chain verify Stellar, compiled to `wasm32-unknown-unknown` and loaded through [`08-wasm`](https://github.com/cosmos/ibc-go/tree/main/modules/light-clients/08-wasm).
 
-The consensus checks live in
-[`stellar-consensus-verifier`](https://crates.io/crates/stellar-consensus-verifier)
-([source](https://github.com/ipsadev/stellar-consensus-verifier)); this crate is the
-`08-wasm` contract around them.
+Running inside the consuming chain, it does three things: checks that a quorum of a trusted set of Stellar validators confirmed a ledger, binds that ledger to the state root published by an IBC router contract, and answers membership and non-membership proofs against that root. The consensus checks themselves live in [`stellar-consensus-verifier`](https://crates.io/crates/stellar-consensus-verifier) ([source](https://github.com/ipsadev/stellar-consensus-verifier)); this crate is the `08-wasm` contract around them.
 
 > [!WARNING]
-> **Early, under active development. Not production-ready.** No third-party
-> security audit has been done. The client trusts exactly the quorum sets it is
-> instantiated with: the testnet fixtures use a 2-of-3 set, which two
-> compromised keys can forge and one equivocating validator can fork.
+> **Early, under active development. Not production-ready.** No third-party security audit has been done. The client trusts exactly the quorum sets it is instantiated with: the testnet fixtures use a 2-of-3 set, which two compromised keys can forge and one equivocating validator can fork.
 
-## What the client checks
+## What a header must satisfy
 
-A header is accepted only when all of these hold:
+A *header* carries a Stellar ledger and the SCP messages that closed it. It is accepted only when all of these hold:
 
-1. its slot is not below the `valid_from` of the quorum configuration in force at the latest height, so a superseded trust root is never used again, for updates or for misbehaviour;
+1. its slot is not below the `valid_from` of the quorum configuration in force at the latest height;
 2. every SCP envelope is signed by its node over this network's id;
-3. the statements confirm a commit for one value, by a quorum that contains a
-   slice of the configured trust root for that slot;
+3. the statements confirm a commit for one value, by a quorum containing a slice of the configured trust root for that slot;
 4. that value is byte-identical to the ledger header's `scpValue`;
-5. the next slot is confirmed the same way, and its transaction set names this
-   ledger's hash as its predecessor, which binds every other header field;
-6. the ledger follows the stored consensus state at the slot before it, when
-   there is one;
-7. its close time is not earlier than the latest trusted ledger's, when it advances the client. Since Protocol 30 two ledgers can close within the same second (CAP-88), so an equal second is accepted;
-8. its close time is not later than the latest trusted ledger's, when it fills in a slot below the latest;
-9. when a state root is supplied, the transaction results hash to the header's `txSetResultHash`, the chosen transaction is a successful contract call, directly or as the inner transaction of a fee-bump, and it carries at least one root event from the configured router. The last of them is bound: the success preimage holds only events from calls that succeeded, in the order they were emitted, so the last root is the router's state when the invocation ended.
+5. the next slot is confirmed the same way, and its transaction set names this ledger's hash as predecessor, binding every other header field;
+6. the ledger follows the stored consensus state at the slot before it, when there is one;
+7. advancing the client: its close time is not earlier than the latest trusted ledger's (equal seconds allowed; CAP-88, Protocol 30);
+8. filling a slot below the latest: its close time is not later than the latest trusted ledger's.
 
-A Stellar ledger can contain more than one router transaction, and the router publishes a fresh root after each one, every root over the same sparse Merkle tree, so each is cumulative over the commitments before it. The canonical root for a ledger is the one its last router transaction published: it is the only root that covers every commitment the ledger made, and the one a relayer must prove.
+When a header also supplies a state root, three more checks apply: the transaction results hash to the header's `txSetResultHash`; the chosen transaction is a successful contract call, directly or as a fee-bump's inner transaction; and it carries at least one root event from the configured router. The **last** such event is bound: the success preimage holds only events from calls that succeeded, in emission order, so the last root is the router's state when the invocation ended.
 
-The client stores one root per ledger height, together with the index of the transaction result that published it, and lets that root move forward within the ledger: a root from a later result replaces the stored one, and a root from an earlier result is refused as superseded. Binding an earlier transaction's root first therefore cannot block the canonical one. Result order is apply order for router transactions: stellar-core applies the result set's stages one after another, and refuses a transaction set whose parallel clusters share a read-write key, which every root-publishing router call does. A root stored before result indexes were kept has no known position, so a different root for that ledger is refused as a conflict.
+## Roots within a ledger
 
-Proofs are checked against a 64-level sparse Merkle tree keyed by the first 8
-bytes of `sha256(path)`, the tree the router maintains. The proofs travel in
-ICS-23 messages, but the tree is not an ICS-23 spec, and `proof_specs` in the
-client state is carried and compared but not used.
+A ledger can contain several router transactions, each publishing a fresh root over the same sparse Merkle tree, so each root is cumulative. The canonical root is the one the **last** router transaction published: the only root covering every commitment the ledger made, and the one a relayer must prove.
 
-The client refuses rather than ignores what it cannot honour:
+The client stores one root per ledger height with the index of the result that published it, and lets it move forward within the ledger: a later result replaces the stored root; an earlier one is refused as superseded. Result order is apply order: stellar-core applies result stages in sequence and refuses parallel clusters that share a read-write key, which every root-publishing call does. A root stored before result indexes were kept has no known position, so a different root for that ledger is a conflict.
+
+Proofs are checked against a 64-level sparse Merkle tree keyed by the first 8 bytes of `sha256(path)`. They travel in ICS-23 messages, but the tree is not an ICS-23 spec, and `proof_specs` is carried and compared but not used.
+
+## What the client refuses
 
 | Input | Behaviour |
 |---|---|
@@ -60,15 +46,11 @@ The client refuses rather than ignores what it cannot honour:
 | a different root from an earlier transaction result in that ledger | refused as superseded |
 | a different ledger for a stored slot | refused |
 
-The initial consensus state is the one part of the trust root that no SCP evidence backs, so instantiate trusts as little of it as it can. It drops any root the state carries, and the first verified header for that slot binds one. It refuses a close time more than 600 seconds ahead of the block time, which would otherwise stop the client from ever advancing or expiring. Its ledger hash is still taken as given: if it is wrong, the real header for that slot is misbehaviour evidence and anyone can freeze the client with it.
-
-`TimestampAtHeight` returns nanoseconds, as ibc-go expects. A recovery starts a
-new generation: consensus states stored before it are no longer trusted.
+The initial consensus state is the one part of the trust root no SCP evidence backs, so instantiate trusts as little of it as it can: it drops any root (the first verified header binds one) and refuses a close time more than 600 seconds ahead of the block time. Its ledger hash is taken as given: if it is wrong, the real header for that slot is misbehaviour evidence, and anyone can freeze the client with it. `TimestampAtHeight` returns nanoseconds, as ibc-go expects. A recovery starts a new generation: consensus states stored before it are no longer trusted.
 
 ## Operations
 
-`docs/ops` covers verifying, storing, migrating and recovering the client on a
-chain.
+`docs/ops` covers verifying, storing, migrating and recovering the client on a chain.
 
 | Page | Answers |
 |---|---|
@@ -79,23 +61,16 @@ chain.
 
 ## Working on it
 
-Recipes live in the `justfile`; `just --list` shows them all.
+Recipes live in the `justfile` (`just --list`):
 
 ```sh
-just ci              # exactly what CI runs: fmt-check, lint, test, audit
+just ci              # what CI runs: fmt-check, lint, test, audit
 just test            # the whole suite
 just test-one scp    # one binary: scp, entrypoint, merkle, migrate, ics20_transfer_flow, proof_conformance
 just fmt             # needs nightly, for imports_granularity
 ```
 
-Tests are grouped by the surface they cover. `tests/scp/` is one binary with
-`synthetic` checks and the `mainnet` / `testnet_chain` fixture replays; the rest
-are one binary each.
-Recorded ledgers live in `tests/fixtures/`.
-
-`tests/scp/` also replays testnet ledger 5541000, a Protocol 30 ledger whose agreed value records its close time in milliseconds (`StellarValue` kind 3), read with `stellar-consensus-verifier` 2.3.0.
-
-`just audit` ignores RUSTSEC-2026-0387 (`crypto-bigint` 0.5): it reaches the client only through `cosmwasm-std`'s secp256k1 code, which this client never calls; Stellar's signatures are Ed25519, checked with `ed25519-dalek`.
+`tests/scp/` is one binary with `synthetic` checks plus the `mainnet` / `testnet_chain` fixture replays (including Protocol 30 testnet ledger 5541000, whose value records its close time in milliseconds); the rest are one binary each, with recorded ledgers in `tests/fixtures/`. `just audit` ignores RUSTSEC-2026-0387 (`crypto-bigint` 0.5): it is reachable only through `cosmwasm-std`'s secp256k1 code, which this client never calls. Stellar's signatures are Ed25519, checked with `ed25519-dalek`.
 
 ## Build
 
@@ -105,30 +80,10 @@ just verify-reproducible  # build twice from a cold cache and diff the checksums
 just checksum             # the on-chain (uncompressed) hash
 ```
 
-Docker is required. A host build produces different bytes, so
-`scripts/release-build.sh` refuses to run without it, and `just build-wasm`
-compiles the contract but does **not** reproduce the published checksum.
+Docker is required; a host build produces different bytes, so `scripts/release-build.sh` refuses to run without it, and `just build-wasm` compiles the contract but does **not** reproduce the published checksum. Three things fix the output: the Rust toolchain (1.91.1), binaryen (`wasm-opt` 129, sha256-verified during the image build), and `Cargo.lock` under `--locked`; `SOURCE_DATE_EPOCH=0` and `--remap-path-prefix` strip the timestamp and absolute paths.
 
-Three things fix the output bytes: the Rust toolchain (1.91.1), binaryen
-(`wasm-opt` 129, verified by tarball sha256 during the image build), and
-`Cargo.lock` under `--locked`. `SOURCE_DATE_EPOCH=0` and `--remap-path-prefix`
-remove the build timestamp and the absolute dependency paths.
+Every pull request builds the artifact twice from a cold cache and fails if the checksums differ. Pushing a `v*` tag (which must match `Cargo.toml`'s `version`) runs the same proof, then publishes the artifact, its `.gz`, and `checksums.txt` to a GitHub release whose notes carry the on-chain checksum and the reproduce commands. Sources are passed to `rustc` relative to the crate root, so the crate sits at the root of its own repository to keep the checksum independent of checkout location.
 
-Every pull request builds the artifact twice from a cold cache and fails if the
-checksums differ. Pushing a `v*` tag runs the same proof, then publishes the
-artifact, its `.gz`, and `checksums.txt` to a GitHub release whose notes carry
-the on-chain checksum and the commands to reproduce it. The tag must match the
-`version` in `Cargo.toml`.
+## Security & License
 
-The crate's own sources are passed to `rustc` as paths relative to the crate
-root, so they are embedded as `src/entrypoint.rs` and so on. This is why the
-crate sits at the root of its own repository: the embedded paths, and therefore
-the checksum, no longer depend on where the tree is checked out.
-
-## Security
-
-Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
-
-## License
-
-Copyright 2026 Amanda Gonsalves. Licensed under the [Apache License 2.0](LICENSE).
+Report vulnerabilities privately; see [SECURITY.md](SECURITY.md). Copyright 2026 Amanda Gonsalves. Licensed under the [Apache License 2.0](LICENSE).
