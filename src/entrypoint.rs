@@ -29,10 +29,12 @@ const STELLAR_REVISION_NUMBER: u64 = 0;
 
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 
+const MAX_INITIAL_CLOCK_DRIFT_SECONDS: u64 = 600;
+
 #[entry_point]
 pub fn instantiate(
     deps: DepsMut<'_>,
-    _env: Env,
+    env: Env,
     _info: MessageInfo,
     msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
@@ -55,6 +57,17 @@ pub fn instantiate(
         ));
     }
 
+    let block_time = env.block.time.seconds();
+
+    if consensus_state.timestamp > block_time.saturating_add(MAX_INITIAL_CLOCK_DRIFT_SECONDS) {
+        return Err(ContractError::ConsensusTimestampInFuture {
+            timestamp: consensus_state.timestamp,
+            block_time,
+            allowed_drift: MAX_INITIAL_CLOCK_DRIFT_SECONDS,
+        });
+    }
+
+    consensus_state.root.clear();
     consensus_state.generation = client_state.generation;
 
     store::init_client_state(deps.storage, &client_state, msg.checksum.as_slice());
@@ -348,6 +361,15 @@ fn verify_header(
         .ok_or(ContractError::SlotOverflow {
             slot: header.slot_index,
         })?;
+    let active_from = active_trust_root_start(cs);
+
+    if header.slot_index < active_from {
+        return Err(ContractError::SlotBeforeActiveTrustRoot {
+            slot: header.slot_index,
+            active_from,
+        });
+    }
+
     let local = applicable_quorum_set(cs, header.slot_index)?;
     let local_next = applicable_quorum_set(cs, next_slot)?;
     let verified = verify::verify(Inputs {
@@ -485,6 +507,21 @@ fn validate_quorum_configs(cs: &ClientState) -> Result<(), ContractError> {
     Ok(())
 }
 
+fn active_trust_root_start(cs: &ClientState) -> u64 {
+    let latest = cs
+        .latest_height
+        .as_ref()
+        .map(|h| h.revision_height)
+        .unwrap_or(0);
+
+    cs.quorum_configs
+        .iter()
+        .map(|c| c.valid_from)
+        .filter(|valid_from| *valid_from <= latest)
+        .max()
+        .unwrap_or(0)
+}
+
 fn applicable_quorum_set(cs: &ClientState, slot: u64) -> Result<QuorumSet, ContractError> {
     let mut applicable = cs.quorum_configs.iter().filter(|c| c.valid_from <= slot);
     let mut chosen = applicable
@@ -591,6 +628,19 @@ fn update_state(
                     close_time: verified.header.timestamp,
                     latest,
                     previous: previous.timestamp,
+                });
+            }
+        }
+    }
+
+    if verified.header.slot_index < latest {
+        if let Some(latest_consensus) = current_consensus_state(deps.as_ref(), &cs, latest) {
+            if verified.header.timestamp > latest_consensus.timestamp {
+                return Err(ContractError::BackfillCloseTimeAfterLatest {
+                    slot: verified.header.slot_index,
+                    close_time: verified.header.timestamp,
+                    latest,
+                    latest_close_time: latest_consensus.timestamp,
                 });
             }
         }

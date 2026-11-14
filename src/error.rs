@@ -84,6 +84,30 @@ pub enum ContractError {
         previous: u64,
     },
     #[error(
+        "backfilled ledger {slot} closed at {close_time}, after the latest trusted consensus \
+         state at {latest} (closed {latest_close_time})"
+    )]
+    BackfillCloseTimeAfterLatest {
+        slot: u64,
+        close_time: u64,
+        latest: u64,
+        latest_close_time: u64,
+    },
+    #[error(
+        "slot {slot} is below {active_from}, where the trust root in force at the latest height \
+         begins; a superseded trust root is never used again"
+    )]
+    SlotBeforeActiveTrustRoot { slot: u64, active_from: u64 },
+    #[error(
+        "the initial consensus state closed at {timestamp}, more than {allowed_drift}s after the \
+         block time {block_time}"
+    )]
+    ConsensusTimestampInFuture {
+        timestamp: u64,
+        block_time: u64,
+        allowed_drift: u64,
+    },
+    #[error(
         "misbehaviour headers are for slots {first} and {second}; fork evidence needs one slot"
     )]
     MisbehaviourSlotMismatch { first: u64, second: u64 },
