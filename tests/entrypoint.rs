@@ -168,6 +168,7 @@ fn fresh_consensus_state(ts: u64, ledger_hash: [u8; 32], root: [u8; 32]) -> Cons
         ledger_hash: ledger_hash.to_vec(),
         root: root.to_vec(),
         generation: 0,
+        root_result_index: None,
     }
 }
 
@@ -682,6 +683,7 @@ fn verify_membership_accepts_valid_proof_against_matching_root() {
         ledger_hash: LEDGER_HASH_INIT.to_vec(),
         root: root.to_vec(),
         generation: 0,
+        root_result_index: None,
     };
 
     instantiate(
@@ -1475,14 +1477,19 @@ fn shared_ledger_header(
     }
 }
 
-#[test]
-fn two_router_transactions_in_one_ledger_make_the_last_root_canonical() {
-    let mut deps = mock_dependencies();
+const ROOT_FIRST: [u8; 32] = [0xa1; 32];
+const ROOT_LAST: [u8; 32] = [0xb2; 32];
 
-    instantiate_with_router(&mut deps);
+fn two_router_transactions(slot: u64, result_index: u32) -> StellarHeader {
+    router_transactions_publishing(slot, ROOT_FIRST, ROOT_LAST, result_index)
+}
 
-    let root_first = [0xa1; 32];
-    let root_last = [0xb2; 32];
+fn router_transactions_publishing(
+    slot: u64,
+    root_first: [u8; 32],
+    root_last: [u8; 32],
+    result_index: u32,
+) -> StellarHeader {
     let preimage_first = success_preimage(&[contract_event(
         &ROUTER_ID,
         ROOT_TOPIC,
@@ -1495,7 +1502,6 @@ fn two_router_transactions_in_one_ledger_make_the_last_root_canonical() {
     )]);
     let hash_first: [u8; 32] = Sha256::digest(&preimage_first).into();
     let hash_last: [u8; 32] = Sha256::digest(&preimage_last).into();
-
     let pairs = vec![
         invoke_result_pair([0x11; 32], [0x99; 32]),
         invoke_result_pair([0x22; 32], hash_first),
@@ -1504,41 +1510,118 @@ fn two_router_transactions_in_one_ledger_make_the_last_root_canonical() {
     let mut hasher = Sha256::new();
 
     hasher.update(u32be(pairs.len() as u32));
+
     for p in &pairs {
         hasher.update(p);
     }
 
     let tx_set_result_hash: [u8; 32] = hasher.finalize().into();
+    let preimage = match result_index {
+        1 => preimage_first,
+        2 => preimage_last,
+        other => panic!("no router transaction at result {other}"),
+    };
 
-    push_header(
-        &mut deps,
-        &shared_ledger_header(105, &pairs, tx_set_result_hash, 2, preimage_last.clone()),
-    )
-    .expect("the last router transaction's root binds");
-    let cons = stellar_light_client::store::consensus_state(deps.as_ref().storage, 105).unwrap();
+    shared_ledger_header(slot, &pairs, tx_set_result_hash, result_index, preimage)
+}
 
-    assert_eq!(
-        cons.root,
-        root_last.to_vec(),
-        "the last router transaction in the ledger is the canonical root"
+fn stored_at(
+    deps: &cosmwasm_std::OwnedDeps<
+        cosmwasm_std::MemoryStorage,
+        cosmwasm_std::testing::MockApi,
+        cosmwasm_std::testing::MockQuerier,
+    >,
+    height: u64,
+) -> ConsensusState {
+    stellar_light_client::store::consensus_state(deps.as_ref().storage, height).unwrap()
+}
+
+#[test]
+fn two_router_transactions_in_one_ledger_make_the_last_root_canonical() {
+    let mut deps = mock_dependencies();
+
+    instantiate_with_router(&mut deps);
+    push_header(&mut deps, &two_router_transactions(105, 2))
+        .expect("the last router transaction's root binds");
+
+    assert_eq!(stored_at(&deps, 105).root, ROOT_LAST.to_vec());
+    assert_eq!(stored_at(&deps, 105).root_result_index, Some(2));
+
+    push_header(&mut deps, &two_router_transactions(105, 2))
+        .expect("re-binding the same canonical root from the same ledger is idempotent");
+
+    let err = push_header(&mut deps, &two_router_transactions(105, 1)).unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            ContractError::RootSupersededInLedger {
+                height: 105,
+                stored_index: 2,
+                offered_index: 1,
+            }
+        ),
+        "an earlier transaction's root in the same ledger is superseded: {err}"
     );
+    assert_eq!(stored_at(&deps, 105).root, ROOT_LAST.to_vec());
+}
 
+#[test]
+fn a_later_router_transaction_replaces_an_earlier_root_in_the_same_ledger() {
+    let mut deps = mock_dependencies();
+
+    instantiate_with_router(&mut deps);
+    push_header(&mut deps, &two_router_transactions(105, 1))
+        .expect("an earlier router transaction's root binds first");
+
+    assert_eq!(stored_at(&deps, 105).root, ROOT_FIRST.to_vec());
+
+    push_header(&mut deps, &two_router_transactions(105, 2))
+        .expect("binding an earlier root first cannot block the canonical one");
+
+    assert_eq!(stored_at(&deps, 105).root, ROOT_LAST.to_vec());
+    assert_eq!(stored_at(&deps, 105).root_result_index, Some(2));
+}
+
+#[test]
+fn the_same_root_from_an_earlier_result_keeps_the_later_index() {
+    let mut deps = mock_dependencies();
+
+    instantiate_with_router(&mut deps);
     push_header(
         &mut deps,
-        &shared_ledger_header(105, &pairs, tx_set_result_hash, 2, preimage_last),
+        &router_transactions_publishing(105, ROOT_LAST, ROOT_LAST, 2),
     )
-    .expect("re-binding the same canonical root from the same ledger is idempotent");
-
-    let err = push_header(
+    .expect("the later result binds");
+    push_header(
         &mut deps,
-        &shared_ledger_header(105, &pairs, tx_set_result_hash, 1, preimage_first),
+        &router_transactions_publishing(105, ROOT_LAST, ROOT_LAST, 1),
     )
-    .unwrap_err();
+    .expect("an earlier result republishing the same root is a no-op");
+
+    assert_eq!(stored_at(&deps, 105).root_result_index, Some(2));
+}
+
+#[test]
+fn a_root_stored_without_its_result_index_is_never_replaced() {
+    let mut deps = mock_dependencies();
+
+    instantiate_with_router(&mut deps);
+    push_header(&mut deps, &two_router_transactions(105, 1)).expect("first root binds");
+
+    let mut legacy = stored_at(&deps, 105);
+
+    legacy.root_result_index = None;
+    stellar_light_client::store::set_consensus_state(deps.as_mut().storage, 105, &legacy);
+
+    let err = push_header(&mut deps, &two_router_transactions(105, 2)).unwrap_err();
 
     assert!(
         matches!(err, ContractError::ConsensusStateConflict { height: 105 }),
-        "an earlier transaction's root in the same ledger must conflict: {err}"
+        "a root bound before result indexes were kept has an unknown position, got {err:?}"
     );
+    push_header(&mut deps, &two_router_transactions(105, 1))
+        .expect("the same root it already holds is still a no-op");
 }
 
 #[test]
@@ -2274,4 +2357,16 @@ fn a_backfilled_ledger_cannot_close_after_the_latest_one() {
     );
     push_header(&mut deps, &header_at(105, 1_700_000_110))
         .expect("closing in the same second as the latest ledger is allowed");
+}
+
+#[test]
+fn instantiate_drops_a_supplied_result_index() {
+    let mut deps = mock_dependencies();
+    let mut consensus = fresh_consensus_state(1_000_000, LEDGER_HASH_INIT, ROOT_INIT);
+
+    consensus.root_result_index = Some(7);
+    instantiate_custom(&mut deps, mock_env(), &fresh_client_state(100), &consensus)
+        .expect("instantiate");
+
+    assert_eq!(stored_at(&deps, 100).root_result_index, None);
 }

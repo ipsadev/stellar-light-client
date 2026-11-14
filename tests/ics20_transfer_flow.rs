@@ -101,6 +101,7 @@ fn instantiate_full(
         ledger_hash: LEDGER_HASH.to_vec(),
         root: root.to_vec(),
         generation: 0,
+        root_result_index: None,
     };
     let msg = InstantiateMsg {
         client_state: encode(&client_state(height, None)),

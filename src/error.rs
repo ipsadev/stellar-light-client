@@ -64,6 +64,15 @@ pub enum ContractError {
     #[error("conflicting consensus state already stored at height {height}")]
     ConsensusStateConflict { height: u64 },
     #[error(
+        "ledger {height} already holds the root published by result {stored_index}; the root \
+         from earlier result {offered_index} is superseded"
+    )]
+    RootSupersededInLedger {
+        height: u64,
+        stored_index: u32,
+        offered_index: u32,
+    },
+    #[error(
         "ledger {slot} names predecessor {found}, but the trusted consensus state at {previous} \
          has ledger hash {expected}"
     )]
