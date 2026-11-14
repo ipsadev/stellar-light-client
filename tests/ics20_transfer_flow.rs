@@ -96,20 +96,27 @@ fn instantiate_full(
 ) -> cosmwasm_std::Addr {
     let code_id = app.store_code(light_client());
     let admin = app.api().addr_make("admin");
+    let consensus = ConsensusState {
+        timestamp: 1_000_000 + height,
+        ledger_hash: LEDGER_HASH.to_vec(),
+        root: root.to_vec(),
+        generation: 0,
+    };
     let msg = InstantiateMsg {
         client_state: encode(&client_state(height, None)),
-        consensus_state: encode(&ConsensusState {
-            timestamp: 1_000_000 + height,
-            ledger_hash: LEDGER_HASH.to_vec(),
-            root: root.to_vec(),
-            generation: 0,
-        }),
+        consensus_state: encode(&consensus),
         checksum: Binary::default(),
     };
 
     let addr = app
         .instantiate_contract(code_id, admin, &msg, &[], "stellar-light-client", None)
         .expect("instantiate");
+
+    stellar_light_client::store::set_consensus_state(
+        app.contract_storage_mut(&addr).as_mut(),
+        height,
+        &consensus,
+    );
 
     if frozen.is_some() {
         stellar_light_client::store::set_client_state(

@@ -22,16 +22,18 @@ The consensus checks live in
 
 A header is accepted only when all of these hold:
 
-1. every SCP envelope is signed by its node over this network's id;
-2. the statements confirm a commit for one value, by a quorum that contains a
+1. its slot is not below the `valid_from` of the quorum configuration in force at the latest height, so a superseded trust root is never used again, for updates or for misbehaviour;
+2. every SCP envelope is signed by its node over this network's id;
+3. the statements confirm a commit for one value, by a quorum that contains a
    slice of the configured trust root for that slot;
-3. that value is byte-identical to the ledger header's `scpValue`;
-4. the next slot is confirmed the same way, and its transaction set names this
+4. that value is byte-identical to the ledger header's `scpValue`;
+5. the next slot is confirmed the same way, and its transaction set names this
    ledger's hash as its predecessor, which binds every other header field;
-5. the ledger follows the stored consensus state at the slot before it, when
+6. the ledger follows the stored consensus state at the slot before it, when
    there is one;
-6. its close time is not earlier than the latest trusted ledger's, when it advances the client. Since Protocol 30 two ledgers can close within the same second (CAP-88), so an equal second is accepted;
-7. when a state root is supplied, the transaction results hash to the header's
+7. its close time is not earlier than the latest trusted ledger's, when it advances the client. Since Protocol 30 two ledgers can close within the same second (CAP-88), so an equal second is accepted;
+8. its close time is not later than the latest trusted ledger's, when it fills in a slot below the latest;
+9. when a state root is supplied, the transaction results hash to the header's
    `txSetResultHash`, the chosen transaction is a successful contract call, and
    it carries exactly one root event from the configured router.
 
@@ -57,9 +59,14 @@ The client refuses rather than ignores what it cannot honour:
 | a revision number other than 0 | refused; Stellar has one revision |
 | a non-zero delay period | refused; delays are not enforced |
 | `max_consensus_age` of 0 | refused at instantiate and recovery; the trust root must expire |
+| a root in the initial consensus state | dropped; the first verified header for that slot binds it |
+| an initial close time more than 600 seconds ahead of the block time | refused |
+| a header below the `valid_from` of the configuration in force at the latest height | refused, including as misbehaviour evidence |
 | a header with no state root, for a ledger already stored with one | accepted as a no-op |
 | the same ledger with a root, after a root-less update | the root is added |
 | a different ledger, or a different root, for a stored slot | refused |
+
+The initial consensus state is the one part of the trust root that no SCP evidence backs, so instantiate trusts as little of it as it can. It drops any root the state carries, and the first verified header for that slot binds one. It refuses a close time more than 600 seconds ahead of the block time, which would otherwise stop the client from ever advancing or expiring. Its ledger hash is still taken as given: if it is wrong, the real header for that slot is misbehaviour evidence and anyone can freeze the client with it.
 
 `TimestampAtHeight` returns nanoseconds, as ibc-go expects. A recovery starts a
 new generation: consensus states stored before it are no longer trusted.

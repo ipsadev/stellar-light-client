@@ -233,6 +233,23 @@ fn do_instantiate(
     instantiate(deps.as_mut(), env, info, msg).expect("instantiate");
 }
 
+fn store_root(
+    deps: &mut cosmwasm_std::OwnedDeps<
+        cosmwasm_std::MemoryStorage,
+        cosmwasm_std::testing::MockApi,
+        cosmwasm_std::testing::MockQuerier,
+    >,
+    height: u64,
+    root: [u8; 32],
+) {
+    let storage = deps.as_mut().storage;
+    let mut consensus = stellar_light_client::store::consensus_state(storage, height)
+        .expect("a consensus state to bind the root into");
+
+    consensus.root = root.to_vec();
+    stellar_light_client::store::set_consensus_state(storage, height, &consensus);
+}
+
 #[test]
 fn instantiate_stores_state_and_consensus() {
     let mut deps = mock_dependencies();
@@ -583,6 +600,7 @@ fn verify_membership_rejects_when_proof_bytes_are_empty() {
     let mut deps = mock_dependencies();
 
     do_instantiate(&mut deps);
+    store_root(&mut deps, 100, ROOT_INIT);
     let err = sudo(
         deps.as_mut(),
         mock_env(),
@@ -677,6 +695,7 @@ fn verify_membership_accepts_valid_proof_against_matching_root() {
         },
     )
     .unwrap();
+    store_root(&mut deps, 100, root);
     sudo(
         deps.as_mut(),
         mock_env(),
@@ -1797,23 +1816,13 @@ fn freezing_after_a_code_migration_keeps_the_new_checksum() {
 #[test]
 fn a_timestamp_too_large_for_nanoseconds_is_an_error_not_a_wrap() {
     let mut deps = mock_dependencies();
-    let info = message_info(&deps.api.addr_make("creator"), &[]);
 
-    instantiate(
-        deps.as_mut(),
-        mock_env(),
-        info,
-        InstantiateMsg {
-            client_state: encode(&fresh_client_state(100)),
-            consensus_state: encode(&fresh_consensus_state(
-                u64::MAX,
-                LEDGER_HASH_INIT,
-                ROOT_INIT,
-            )),
-            checksum: Binary::default(),
-        },
-    )
-    .expect("instantiate");
+    do_instantiate(&mut deps);
+    stellar_light_client::store::set_consensus_state(
+        deps.as_mut().storage,
+        100,
+        &fresh_consensus_state(u64::MAX, LEDGER_HASH_INIT, ROOT_INIT),
+    );
     let err = query(
         deps.as_ref(),
         mock_env(),
@@ -2038,4 +2047,231 @@ fn instantiate_refuses_a_malformed_client_or_consensus_state() {
     .unwrap_err();
 
     assert!(matches!(err, ContractError::InvalidConsensusState(_)));
+}
+
+fn instantiate_custom(
+    deps: &mut cosmwasm_std::OwnedDeps<
+        cosmwasm_std::MemoryStorage,
+        cosmwasm_std::testing::MockApi,
+        cosmwasm_std::testing::MockQuerier,
+    >,
+    env: cosmwasm_std::Env,
+    cs: &ClientState,
+    consensus: &ConsensusState,
+) -> Result<Response, ContractError> {
+    let info = message_info(&deps.api.addr_make("creator"), &[]);
+
+    instantiate(
+        deps.as_mut(),
+        env,
+        info,
+        InstantiateMsg {
+            client_state: encode(cs),
+            consensus_state: encode(consensus),
+            checksum: Binary::default(),
+        },
+    )
+}
+
+fn env_at(seconds: u64) -> cosmwasm_std::Env {
+    let mut env = mock_env();
+
+    env.block.time = cosmwasm_std::Timestamp::from_seconds(seconds);
+
+    env
+}
+
+fn rotated_client_state(latest_height: u64) -> ClientState {
+    let successors: Vec<[u8; 32]> = (5..=8)
+        .map(|seed| validator(seed).verifying_key().to_bytes())
+        .collect();
+    let mut cs = fresh_client_state(latest_height);
+
+    cs.quorum_configs.push(QuorumConfig {
+        quorum_set_xdr: quorum_set_xdr(&successors, 3),
+        valid_from: 100,
+    });
+
+    cs
+}
+
+#[test]
+fn instantiate_drops_the_supplied_root() {
+    let mut deps = mock_dependencies();
+
+    do_instantiate(&mut deps);
+    let stored = stellar_light_client::store::consensus_state(deps.as_ref().storage, 100).unwrap();
+
+    assert!(
+        stored.root.is_empty(),
+        "a root no header proved must not be trusted"
+    );
+
+    let err = sudo(
+        deps.as_mut(),
+        mock_env(),
+        membership_at(height_at(0, 100), 0, 0),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, ContractError::StateRootNotBound { height: 100 }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn the_root_at_the_initial_height_is_bound_by_its_header() {
+    let mut deps = mock_dependencies();
+    let root = [0x7c; 32];
+    let bound = header_with_root(100, root);
+    let ledger_hash: [u8; 32] = Sha256::digest(&bound.ledger_header_xdr).into();
+    let mut cs = fresh_client_state(100);
+
+    cs.router_contract_id = ROUTER_ID.to_vec();
+    cs.root_event_topic = ROOT_TOPIC.to_vec();
+    instantiate_custom(
+        &mut deps,
+        env_at(1_700_000_100),
+        &cs,
+        &fresh_consensus_state(1_700_000_100, ledger_hash, ROOT_INIT),
+    )
+    .expect("instantiate");
+    push_header(&mut deps, &bound).expect("the initial ledger's header binds its root");
+    let stored = stellar_light_client::store::consensus_state(deps.as_ref().storage, 100).unwrap();
+
+    assert_eq!(stored.root, root.to_vec());
+}
+
+#[test]
+fn instantiate_refuses_a_close_time_far_ahead_of_the_block_time() {
+    let now = 1_700_000_000;
+    let cs = fresh_client_state(100);
+    let mut deps = mock_dependencies();
+    let err = instantiate_custom(
+        &mut deps,
+        env_at(now),
+        &cs,
+        &fresh_consensus_state(now + 601, LEDGER_HASH_INIT, ROOT_INIT),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            ContractError::ConsensusTimestampInFuture {
+                timestamp: 1_700_000_601,
+                block_time: 1_700_000_000,
+                allowed_drift: 600,
+            }
+        ),
+        "got {err:?}"
+    );
+
+    let mut deps = mock_dependencies();
+
+    instantiate_custom(
+        &mut deps,
+        env_at(now),
+        &cs,
+        &fresh_consensus_state(now + 600, LEDGER_HASH_INIT, ROOT_INIT),
+    )
+    .expect("a close time within the allowed drift is accepted");
+}
+
+#[test]
+fn a_superseded_trust_root_cannot_backfill_its_old_range() {
+    let mut deps = mock_dependencies();
+
+    instantiate_custom(
+        &mut deps,
+        env_at(1_700_000_150),
+        &rotated_client_state(150),
+        &fresh_consensus_state(1_700_000_150, LEDGER_HASH_INIT, ROOT_INIT),
+    )
+    .expect("instantiate");
+    let err = push_header(&mut deps, &header(50)).unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            ContractError::SlotBeforeActiveTrustRoot {
+                slot: 50,
+                active_from: 100,
+            }
+        ),
+        "the retired set signed slot 50, but the client has moved past its range, got {err:?}"
+    );
+    assert!(stellar_light_client::store::consensus_state(deps.as_ref().storage, 50).is_none());
+}
+
+#[test]
+fn a_trust_root_still_in_force_can_backfill_its_range() {
+    let mut deps = mock_dependencies();
+
+    instantiate_custom(
+        &mut deps,
+        env_at(1_700_000_090),
+        &rotated_client_state(90),
+        &fresh_consensus_state(1_700_000_090, LEDGER_HASH_INIT, ROOT_INIT),
+    )
+    .expect("instantiate");
+    push_header(&mut deps, &header(50)).expect("the set in force at the latest height backfills");
+}
+
+#[test]
+fn a_superseded_trust_root_cannot_freeze_the_client() {
+    let mut deps = mock_dependencies();
+
+    instantiate_custom(
+        &mut deps,
+        env_at(1_700_000_150),
+        &rotated_client_state(150),
+        &fresh_consensus_state(1_700_000_150, LEDGER_HASH_INIT, ROOT_INIT),
+    )
+    .expect("instantiate");
+    let err = sudo(
+        deps.as_mut(),
+        mock_env(),
+        SudoMsg::UpdateStateOnMisbehaviour(UpdateStateOnMisbehaviourMsg {
+            client_message: encode(&fork_evidence(50)),
+        }),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            ContractError::SlotBeforeActiveTrustRoot { slot: 50, .. }
+        ),
+        "got {err:?}"
+    );
+
+    let cs = stellar_light_client::store::client_state(deps.as_ref().storage).unwrap();
+
+    assert!(cs.frozen_height.is_none());
+}
+
+#[test]
+fn a_backfilled_ledger_cannot_close_after_the_latest_one() {
+    let mut deps = mock_dependencies();
+
+    do_instantiate(&mut deps);
+    push_header(&mut deps, &header(110)).expect("advance to 110");
+    let err = push_header(&mut deps, &header_at(105, 1_700_000_111)).unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            ContractError::BackfillCloseTimeAfterLatest {
+                slot: 105,
+                close_time: 1_700_000_111,
+                latest: 110,
+                latest_close_time: 1_700_000_110,
+            }
+        ),
+        "got {err:?}"
+    );
+    push_header(&mut deps, &header_at(105, 1_700_000_110))
+        .expect("closing in the same second as the latest ledger is allowed");
 }
