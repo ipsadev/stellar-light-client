@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Pin a fingerprint for every quorum configuration: `QuorumConfig.quorum_set_fingerprint` (field 3) holds `sha256(quorum_set_xdr)`, and a set that does not match it, or a fingerprint that is not 32 bytes, is refused at instantiate, recovery, code migration and on every update. Previously the fingerprint was derived from the set itself, so the check could not fail.
+- Migrating a client stored by 0.3.0 or earlier pins its missing fingerprints from the quorum sets it already holds.
+- Tests for each trust-root rotation boundary and for fingerprint mismatches.
+
+### Documentation
+
+- Add [docs/ops/rotation.md](docs/ops/rotation.md): how a quorum set is chosen per slot, the fingerprint, and the rotation procedure.
+
 ## [0.3.0] - 2026-11-14
 
 ### Changed

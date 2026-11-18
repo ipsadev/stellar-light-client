@@ -11,7 +11,7 @@ Running inside the consuming chain, it does three things: checks that a quorum o
 
 A *header* carries a Stellar ledger and the SCP messages that closed it. It is accepted only when all of these hold:
 
-1. its slot is not below the `valid_from` of the quorum configuration in force at the latest height;
+1. its slot is not below the `valid_from` of the quorum configuration in force at the latest height, and the configurations in force for its slot and the next hash to their pinned fingerprints;
 2. every SCP envelope is signed by its node over this network's id;
 3. the statements confirm a commit for one value, by a quorum containing a slice of the configured trust root for that slot;
 4. that value is byte-identical to the ledger header's `scpValue`;
@@ -40,6 +40,7 @@ Proofs are checked against a 64-level sparse Merkle tree keyed by the first 8 by
 | a root in the initial consensus state | dropped; the first verified header for that slot binds it |
 | an initial close time more than 600 seconds ahead of the block time | refused |
 | a header below the `valid_from` of the configuration in force at the latest height | refused, including as misbehaviour evidence |
+| a quorum set that does not hash to its `quorum_set_fingerprint`, or a fingerprint that is not 32 bytes | refused at instantiate, recovery and code migration, and on every update; see [rotation.md](docs/ops/rotation.md) |
 | a header with no state root, for a ledger already stored with one | accepted as a no-op |
 | the same ledger with a root, after a root-less update | the root is added |
 | a root from a later transaction result in a ledger already stored with a root | the root moves forward to it |

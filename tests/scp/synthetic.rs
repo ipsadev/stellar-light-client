@@ -5,7 +5,9 @@ use stellar_light_client::scp::{
     verify::{trust_root, verify, Inputs},
 };
 
-use crate::common::{build_ledger, nested_quorum_set, public_of, quorum_set, sha256, signing_key};
+use crate::common::{
+    build_ledger, nested_quorum_set, pinned, public_of, quorum_set, sha256, signing_key,
+};
 
 fn run(l: &crate::common::Ledger, local: &TrustRoot, slot: u64) -> Result<(), String> {
     verify(Inputs {
@@ -24,7 +26,7 @@ fn run(l: &crate::common::Ledger, local: &TrustRoot, slot: u64) -> Result<(), St
 }
 
 fn local_of(l: &crate::common::Ledger) -> TrustRoot {
-    trust_root(&l.quorum_sets[0]).unwrap()
+    trust_root(&pinned(l.quorum_sets[0].clone(), 0)).unwrap()
 }
 
 #[test]
@@ -158,7 +160,7 @@ fn rebuild(l: &crate::common::Ledger) -> crate::common::Ledger {
 fn rejects_signers_outside_the_configured_set() {
     let l = build_ledger(103, 4, 3);
     let strangers: Vec<[u8; 32]> = (10..14).map(|i| public_of(&signing_key(i))).collect();
-    let other = trust_root(&quorum_set(&strangers, 3)).unwrap();
+    let other = trust_root(&pinned(quorum_set(&strangers, 3), 0)).unwrap();
     let err = run(&l, &other, 103).unwrap_err();
 
     assert!(err.contains("confirm commit"), "unexpected: {err}");
