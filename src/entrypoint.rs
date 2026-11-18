@@ -105,9 +105,13 @@ pub fn sudo(deps: DepsMut<'_>, env: Env, msg: SudoMsg) -> Result<Response, Contr
 
 #[entry_point]
 pub fn migrate(deps: DepsMut<'_>, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
-    let client_state = store::client_state(deps.storage).ok_or(ContractError::NotInitialised)?;
+    let mut client_state =
+        store::client_state(deps.storage).ok_or(ContractError::NotInitialised)?;
+
+    let pinned = pin_missing_fingerprints(&mut client_state);
 
     validate_quorum_configs(&client_state)?;
+
     let height = client_state
         .latest_height
         .as_ref()
@@ -116,6 +120,10 @@ pub fn migrate(deps: DepsMut<'_>, _env: Env, _msg: MigrateMsg) -> Result<Respons
 
     if store::consensus_state(deps.storage, height).is_none() {
         return Err(ContractError::ConsensusStateMissing { height });
+    }
+
+    if pinned {
+        store::set_client_state(deps.storage, &client_state);
     }
 
     Ok(Response::default())
@@ -509,10 +517,25 @@ fn validate_quorum_configs(cs: &ClientState) -> Result<(), ContractError> {
             });
         }
 
-        verify::trust_root(&config.quorum_set_xdr)?;
+        verify::trust_root(config)?;
     }
 
     Ok(())
+}
+
+fn pin_missing_fingerprints(cs: &mut ClientState) -> bool {
+    let mut pinned = false;
+
+    for config in cs
+        .quorum_configs
+        .iter_mut()
+        .filter(|config| config.quorum_set_fingerprint.is_empty())
+    {
+        config.quorum_set_fingerprint = verify::fingerprint(&config.quorum_set_xdr).to_vec();
+        pinned = true;
+    }
+
+    pinned
 }
 
 fn active_trust_root_start(cs: &ClientState) -> u64 {
@@ -548,7 +571,7 @@ fn applicable_trust_root(cs: &ClientState, slot: u64) -> Result<TrustRoot, Contr
         }
     }
 
-    verify::trust_root(&chosen.quorum_set_xdr)
+    verify::trust_root(chosen)
 }
 
 fn update_state(

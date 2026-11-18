@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use stellar_light_client::scp::verify::{trust_root, verify, Inputs, VerifiedHeader};
 
+use crate::common::pinned;
+
 #[derive(Deserialize)]
 struct Fixture {
     ledger_seq: u64,
@@ -29,7 +31,7 @@ fn fixture() -> Fixture {
 
 fn run(f: &Fixture, header: &[u8]) -> Result<VerifiedHeader, String> {
     let network_id: [u8; 32] = unhex(&f.network_id).try_into().unwrap();
-    let local = trust_root(&unhex(&f.quorum_sets_xdr[0])).unwrap();
+    let local = trust_root(&pinned(unhex(&f.quorum_sets_xdr[0]), 0)).unwrap();
     let envelopes: Vec<Vec<u8>> = f.envelopes_xdr.iter().map(|e| unhex(e)).collect();
     let next_envelopes: Vec<Vec<u8>> = f.next_envelopes_xdr.iter().map(|e| unhex(e)).collect();
     let quorum_sets: Vec<Vec<u8>> = f.quorum_sets_xdr.iter().map(|q| unhex(q)).collect();

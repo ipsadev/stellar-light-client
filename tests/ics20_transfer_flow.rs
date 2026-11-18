@@ -68,6 +68,7 @@ fn client_state(latest_height: u64, frozen: Option<u64>) -> ClientState {
             revision_height: h,
         }),
         quorum_configs: vec![QuorumConfig {
+            quorum_set_fingerprint: sha256v(&quorum_set_xdr()).to_vec(),
             quorum_set_xdr: quorum_set_xdr(),
             valid_from: 0,
         }],

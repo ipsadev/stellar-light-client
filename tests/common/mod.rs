@@ -2,6 +2,7 @@
 
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
+use stellar_light_client::types::QuorumConfig;
 
 pub const ENVELOPE_TYPE_SCP: [u8; 4] = [0, 0, 0, 1];
 
@@ -36,6 +37,14 @@ pub fn node_id(public: &[u8; 32]) -> Vec<u8> {
 
     out.extend_from_slice(public);
     out
+}
+
+pub fn pinned(quorum_set_xdr: Vec<u8>, valid_from: u64) -> QuorumConfig {
+    QuorumConfig {
+        quorum_set_fingerprint: sha256(&quorum_set_xdr).to_vec(),
+        quorum_set_xdr,
+        valid_from,
+    }
 }
 
 pub fn signing_key(seed: u8) -> SigningKey {

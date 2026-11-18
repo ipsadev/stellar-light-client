@@ -9,6 +9,7 @@ The client is an `08-wasm` contract. A chain stores it by checksum, so every cla
 | [verify.md](verify.md) | Is the published artifact the one this source produces? |
 | [store.md](store.md) | How does the wasm get onto a chain? |
 | [migrate.md](migrate.md) | How is a stored client moved to a new version, or recovered? |
+| [rotation.md](rotation.md) | How does the client move from one quorum set to the next, and how is a rotation scheduled? |
 | [incidents.md](incidents.md) | What breaks, how it is detected, and what to do about it |
 
 ## Releases

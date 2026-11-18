@@ -5,7 +5,7 @@ use stellar_consensus_verifier::verify::{
 };
 
 use super::quorum::QuorumSet;
-use crate::error::ContractError;
+use crate::{error::ContractError, types::QuorumConfig};
 
 #[derive(Clone, Debug)]
 pub struct VerifiedHeader {
@@ -30,11 +30,23 @@ pub struct Inputs<'a> {
     pub quorum_sets_xdr: &'a [Vec<u8>],
 }
 
-pub fn trust_root(quorum_set_xdr: &[u8]) -> Result<TrustRoot, ContractError> {
+pub fn trust_root(config: &QuorumConfig) -> Result<TrustRoot, ContractError> {
+    let fingerprint: [u8; 32] = config
+        .quorum_set_fingerprint
+        .as_slice()
+        .try_into()
+        .map_err(|_| ContractError::TrustRootFingerprintInvalid {
+            valid_from: config.valid_from,
+        })?;
+
     Ok(TrustRoot::from_pinned(
-        quorum_set_xdr,
-        &QuorumSet::hash(quorum_set_xdr),
+        &config.quorum_set_xdr,
+        &fingerprint,
     )?)
+}
+
+pub fn fingerprint(quorum_set_xdr: &[u8]) -> [u8; 32] {
+    QuorumSet::hash(quorum_set_xdr)
 }
 
 pub fn verify(input: Inputs<'_>) -> Result<VerifiedHeader, ContractError> {

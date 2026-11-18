@@ -15,6 +15,8 @@ pub struct QuorumConfig {
     pub quorum_set_xdr: alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]
     pub valid_from: u64,
+    #[prost(bytes = "vec", tag = "3")]
+    pub quorum_set_fingerprint: alloc::vec::Vec<u8>,
 }
 
 #[derive(Clone, PartialEq, Eq, Message, Serialize, Deserialize)]

@@ -17,7 +17,7 @@ Store the new wasm first, as in [store.md](store.md), then point the existing cl
 gaiad tx ibc-wasm migrate-contract <client-id> <new-checksum> '{}' --from <grantee>
 ```
 
-The client keeps its id, so counterparties and channels are unaffected. The contract reads its checksum from the stored client state on every write, so after the migration it keeps the new checksum and goes on updating, freezing and recovering normally. Verify:
+The client keeps its id, so counterparties and channels are unaffected. A client stored by 0.3.0 or earlier carries no quorum-set fingerprints; the migration pins each from the set already stored and refuses one that is present and wrong (see [rotation.md](rotation.md#the-fingerprint)). The contract reads its checksum from the stored client state on every write, so after the migration it keeps the new checksum and goes on updating, freezing and recovering normally. Verify:
 
 ```sh
 gaiad q ibc client state <client-id> --node <rpc>

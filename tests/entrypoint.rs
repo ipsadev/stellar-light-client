@@ -132,13 +132,26 @@ fn validators() -> Vec<SigningKey> {
     (1..=4).map(validator).collect()
 }
 
-fn quorum_config() -> Vec<u8> {
-    let publics: Vec<[u8; 32]> = validators()
-        .iter()
-        .map(|k| k.verifying_key().to_bytes())
-        .collect();
+fn successors() -> Vec<SigningKey> {
+    (5..=8).map(validator).collect()
+}
+
+fn quorum_set_of(keys: &[SigningKey]) -> Vec<u8> {
+    let publics: Vec<[u8; 32]> = keys.iter().map(|k| k.verifying_key().to_bytes()).collect();
 
     quorum_set_xdr(&publics, 3)
+}
+
+fn quorum_config() -> Vec<u8> {
+    quorum_set_of(&validators())
+}
+
+fn pinned(quorum_set_xdr: Vec<u8>, valid_from: u64) -> QuorumConfig {
+    QuorumConfig {
+        quorum_set_fingerprint: Sha256::digest(&quorum_set_xdr).to_vec(),
+        quorum_set_xdr,
+        valid_from,
+    }
 }
 
 fn fresh_client_state(latest_height: u64) -> ClientState {
@@ -149,10 +162,7 @@ fn fresh_client_state(latest_height: u64) -> ClientState {
             revision_height: latest_height,
         }),
         frozen_height: None,
-        quorum_configs: vec![QuorumConfig {
-            quorum_set_xdr: quorum_config(),
-            valid_from: 0,
-        }],
+        quorum_configs: vec![pinned(quorum_config(), 0)],
         proof_specs: vec![],
         network_id: network_id().to_vec(),
         max_consensus_age: TRUSTED_FOR_SECONDS,
@@ -337,10 +347,7 @@ fn instantiate_rejects_an_empty_quorum_configuration() {
 fn instantiate_rejects_two_configurations_sharing_a_valid_from() {
     let mut cs = fresh_client_state(100);
 
-    cs.quorum_configs.push(QuorumConfig {
-        quorum_set_xdr: quorum_config(),
-        valid_from: 0,
-    });
+    cs.quorum_configs.push(pinned(quorum_config(), 0));
     let err = instantiate_with(cs).unwrap_err();
 
     assert!(
@@ -353,10 +360,7 @@ fn instantiate_rejects_two_configurations_sharing_a_valid_from() {
 fn instantiate_accepts_a_rotation_with_distinct_ranges() {
     let mut cs = fresh_client_state(100);
 
-    cs.quorum_configs.push(QuorumConfig {
-        quorum_set_xdr: quorum_config(),
-        valid_from: 50,
-    });
+    cs.quorum_configs.push(pinned(quorum_config(), 50));
     assert!(instantiate_with(cs).is_ok());
 }
 
@@ -364,7 +368,7 @@ fn instantiate_accepts_a_rotation_with_distinct_ranges() {
 fn instantiate_rejects_an_unsound_quorum_set() {
     let mut cs = fresh_client_state(100);
 
-    cs.quorum_configs[0].quorum_set_xdr = quorum_set_xdr(&[[1u8; 32], [2u8; 32]], 0);
+    cs.quorum_configs[0] = pinned(quorum_set_xdr(&[[1u8; 32], [2u8; 32]], 0), 0);
     let err = instantiate_with(cs).unwrap_err();
 
     assert!(matches!(err, ContractError::InvalidWire(_)), "got {err:?}");
@@ -399,8 +403,32 @@ fn header_at(slot: u64, close_time: u64) -> StellarHeader {
 }
 
 fn header_after(slot: u64, close_time: u64, previous_ledger_hash: [u8; 32]) -> StellarHeader {
-    let qset = quorum_config();
+    signed_header(
+        slot,
+        close_time,
+        previous_ledger_hash,
+        &validators(),
+        &validators(),
+    )
+}
+
+fn signed_header(
+    slot: u64,
+    close_time: u64,
+    previous_ledger_hash: [u8; 32],
+    signers: &[SigningKey],
+    next_signers: &[SigningKey],
+) -> StellarHeader {
+    let qset = quorum_set_of(signers);
     let qset_hash: [u8; 32] = Sha256::digest(&qset).into();
+    let next_qset = quorum_set_of(next_signers);
+    let next_qset_hash: [u8; 32] = Sha256::digest(&next_qset).into();
+    let mut quorum_sets_xdr = vec![qset];
+
+    if !quorum_sets_xdr.contains(&next_qset) {
+        quorum_sets_xdr.push(next_qset);
+    }
+
     let value = stellar_value_xdr(close_time);
     let header_xdr = ledger_header_full(slot as u32, &value, [9u8; 32], previous_ledger_hash);
     let ledger_hash: [u8; 32] = Sha256::digest(&header_xdr).into();
@@ -414,14 +442,14 @@ fn header_after(slot: u64, close_time: u64, previous_ledger_hash: [u8; 32]) -> S
     StellarHeader {
         slot_index: slot,
         ledger_header_xdr: header_xdr,
-        scp_envelopes: validators()
+        scp_envelopes: signers
             .iter()
             .map(|k| envelope_xdr(k, slot, &value, qset_hash))
             .collect(),
-        quorum_sets_xdr: vec![qset],
-        next_scp_envelopes: validators()
+        quorum_sets_xdr,
+        next_scp_envelopes: next_signers
             .iter()
-            .map(|k| envelope_xdr(k, slot + 1, &next_value, qset_hash))
+            .map(|k| envelope_xdr(k, slot + 1, &next_value, next_qset_hash))
             .collect(),
         next_tx_set_xdr: next_tx_set,
         state_root_proof: None,
@@ -2209,6 +2237,8 @@ fn instantiate_custom(
     )
 }
 
+const ROTATION_SLOT: u64 = 100;
+
 fn env_at(seconds: u64) -> cosmwasm_std::Env {
     let mut env = mock_env();
 
@@ -2218,15 +2248,10 @@ fn env_at(seconds: u64) -> cosmwasm_std::Env {
 }
 
 fn rotated_client_state(latest_height: u64) -> ClientState {
-    let successors: Vec<[u8; 32]> = (5..=8)
-        .map(|seed| validator(seed).verifying_key().to_bytes())
-        .collect();
     let mut cs = fresh_client_state(latest_height);
 
-    cs.quorum_configs.push(QuorumConfig {
-        quorum_set_xdr: quorum_set_xdr(&successors, 3),
-        valid_from: 100,
-    });
+    cs.quorum_configs
+        .push(pinned(quorum_set_of(&successors()), ROTATION_SLOT));
 
     cs
 }
@@ -2422,4 +2447,280 @@ fn instantiate_drops_a_supplied_result_index() {
         .expect("instantiate");
 
     assert_eq!(stored_at(&deps, 100).root_result_index, None);
+}
+
+fn instantiate_rotated(
+    deps: &mut cosmwasm_std::OwnedDeps<
+        cosmwasm_std::MemoryStorage,
+        cosmwasm_std::testing::MockApi,
+        cosmwasm_std::testing::MockQuerier,
+    >,
+    latest_height: u64,
+) {
+    let close_time = 1_700_000_000 + latest_height;
+
+    instantiate_custom(
+        deps,
+        env_at(close_time),
+        &rotated_client_state(latest_height),
+        &fresh_consensus_state(close_time, LEDGER_HASH_INIT, ROOT_INIT),
+    )
+    .expect("instantiate");
+}
+
+fn rotation_header(
+    slot: u64,
+    signers: &[SigningKey],
+    next_signers: &[SigningKey],
+) -> StellarHeader {
+    signed_header(slot, 1_700_000_000 + slot, [0u8; 32], signers, next_signers)
+}
+
+fn stored(
+    deps: &cosmwasm_std::OwnedDeps<
+        cosmwasm_std::MemoryStorage,
+        cosmwasm_std::testing::MockApi,
+        cosmwasm_std::testing::MockQuerier,
+    >,
+    slot: u64,
+) -> bool {
+    stellar_light_client::store::consensus_state(deps.as_ref().storage, slot).is_some()
+}
+
+fn assert_no_confirmed_commit(err: &ContractError) {
+    assert!(
+        matches!(err, ContractError::NoConfirmedCommit),
+        "signers outside the trust root in force must not confirm the ledger, got {err:?}"
+    );
+}
+
+#[test]
+fn instantiate_refuses_a_quorum_set_that_does_not_match_its_fingerprint() {
+    let mut cs = fresh_client_state(100);
+
+    cs.quorum_configs[0].quorum_set_fingerprint =
+        Sha256::digest(quorum_set_of(&successors())).to_vec();
+    let err = instantiate_with(cs).unwrap_err();
+
+    assert!(
+        matches!(err, ContractError::TrustRootFingerprintMismatch),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn instantiate_refuses_a_configuration_without_a_32_byte_fingerprint() {
+    for fingerprint in [vec![], vec![0u8; 31], vec![0u8; 33]] {
+        let mut cs = fresh_client_state(100);
+
+        cs.quorum_configs[0].quorum_set_fingerprint = fingerprint.clone();
+        let err = instantiate_with(cs).unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                ContractError::TrustRootFingerprintInvalid { valid_from: 0 }
+            ),
+            "a {}-byte fingerprint pins nothing, got {err:?}",
+            fingerprint.len()
+        );
+    }
+}
+
+#[test]
+fn instantiate_refuses_a_rotation_that_does_not_match_its_fingerprint() {
+    let mut cs = rotated_client_state(90);
+
+    cs.quorum_configs[1].quorum_set_fingerprint = Sha256::digest(quorum_config()).to_vec();
+    let err = instantiate_with(cs).unwrap_err();
+
+    assert!(
+        matches!(err, ContractError::TrustRootFingerprintMismatch),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn instantiate_refuses_an_unsound_rotation() {
+    let publics: Vec<[u8; 32]> = successors()
+        .iter()
+        .map(|k| k.verifying_key().to_bytes())
+        .collect();
+    let mut cs = fresh_client_state(90);
+
+    cs.quorum_configs
+        .push(pinned(quorum_set_xdr(&publics, 1), ROTATION_SLOT));
+    let err = instantiate_with(cs).unwrap_err();
+
+    assert!(matches!(err, ContractError::InvalidWire(_)), "got {err:?}");
+}
+
+#[test]
+fn an_update_is_refused_when_the_stored_quorum_set_no_longer_matches_its_fingerprint() {
+    let mut deps = mock_dependencies();
+
+    do_instantiate(&mut deps);
+
+    let mut cs = stellar_light_client::store::client_state(deps.as_ref().storage).unwrap();
+
+    cs.quorum_configs[0].quorum_set_xdr = quorum_set_of(&successors());
+    stellar_light_client::store::set_client_state(deps.as_mut().storage, &cs);
+
+    let err = push_header(
+        &mut deps,
+        &rotation_header(105, &successors(), &successors()),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, ContractError::TrustRootFingerprintMismatch),
+        "got {err:?}"
+    );
+    assert!(!stored(&deps, 105));
+}
+
+#[test]
+fn a_rotation_with_a_wrong_fingerprint_is_refused_once_its_range_is_reached() {
+    let mut deps = mock_dependencies();
+
+    instantiate_rotated(&mut deps, 90);
+
+    let mut cs = stellar_light_client::store::client_state(deps.as_ref().storage).unwrap();
+
+    cs.quorum_configs[1].quorum_set_fingerprint = vec![0u8; 32];
+    stellar_light_client::store::set_client_state(deps.as_mut().storage, &cs);
+
+    push_header(
+        &mut deps,
+        &rotation_header(95, &validators(), &validators()),
+    )
+    .expect("the old root is still in force at 95 and its pin is intact");
+
+    let err = push_header(
+        &mut deps,
+        &rotation_header(99, &validators(), &successors()),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, ContractError::TrustRootFingerprintMismatch),
+        "slot 99's successor is checked against the rotated root, got {err:?}"
+    );
+    assert!(!stored(&deps, 99));
+}
+
+#[test]
+fn a_ledger_before_the_rotation_is_checked_against_the_old_root() {
+    let mut deps = mock_dependencies();
+
+    instantiate_rotated(&mut deps, 90);
+    push_header(
+        &mut deps,
+        &rotation_header(95, &validators(), &validators()),
+    )
+    .expect("the old set signs 95");
+    assert!(stored(&deps, 95));
+}
+
+#[test]
+fn a_ledger_before_the_rotation_signed_by_the_new_set_is_refused() {
+    let mut deps = mock_dependencies();
+
+    instantiate_rotated(&mut deps, 90);
+
+    let err = push_header(
+        &mut deps,
+        &rotation_header(95, &successors(), &successors()),
+    )
+    .unwrap_err();
+
+    assert_no_confirmed_commit(&err);
+    assert!(!stored(&deps, 95));
+}
+
+#[test]
+fn the_last_ledger_before_the_rotation_takes_its_successor_from_the_new_root() {
+    let mut deps = mock_dependencies();
+
+    instantiate_rotated(&mut deps, 90);
+    push_header(
+        &mut deps,
+        &rotation_header(ROTATION_SLOT - 1, &validators(), &successors()),
+    )
+    .expect("the old set signs 99 and the new set signs its successor, 100");
+    assert!(stored(&deps, ROTATION_SLOT - 1));
+}
+
+#[test]
+fn the_last_ledger_before_the_rotation_refuses_a_successor_signed_by_the_old_set() {
+    let mut deps = mock_dependencies();
+
+    instantiate_rotated(&mut deps, 90);
+
+    let err = push_header(
+        &mut deps,
+        &rotation_header(ROTATION_SLOT - 1, &validators(), &validators()),
+    )
+    .unwrap_err();
+
+    assert_no_confirmed_commit(&err);
+    assert!(!stored(&deps, ROTATION_SLOT - 1));
+}
+
+#[test]
+fn a_ledger_at_the_rotation_is_checked_against_the_new_root() {
+    let mut deps = mock_dependencies();
+
+    instantiate_rotated(&mut deps, 90);
+    push_header(
+        &mut deps,
+        &rotation_header(ROTATION_SLOT, &successors(), &successors()),
+    )
+    .expect("the new set signs the rotation slot");
+    assert!(stored(&deps, ROTATION_SLOT));
+}
+
+#[test]
+fn a_ledger_at_the_rotation_signed_by_the_old_set_is_refused() {
+    let mut deps = mock_dependencies();
+
+    instantiate_rotated(&mut deps, 90);
+
+    let err = push_header(
+        &mut deps,
+        &rotation_header(ROTATION_SLOT, &validators(), &validators()),
+    )
+    .unwrap_err();
+
+    assert_no_confirmed_commit(&err);
+    assert!(!stored(&deps, ROTATION_SLOT));
+}
+
+#[test]
+fn crossing_the_rotation_retires_the_old_root() {
+    let mut deps = mock_dependencies();
+
+    instantiate_rotated(&mut deps, 90);
+    push_header(
+        &mut deps,
+        &rotation_header(ROTATION_SLOT, &successors(), &successors()),
+    )
+    .expect("advance across the rotation");
+
+    let err = push_header(
+        &mut deps,
+        &rotation_header(95, &validators(), &validators()),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            ContractError::SlotBeforeActiveTrustRoot {
+                slot: 95,
+                active_from: ROTATION_SLOT,
+            }
+        ),
+        "got {err:?}"
+    );
 }

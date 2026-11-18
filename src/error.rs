@@ -166,6 +166,8 @@ pub enum ContractError {
     NoBallotEvidence,
     #[error("the quorum set does not match the pinned trust-root fingerprint")]
     TrustRootFingerprintMismatch,
+    #[error("the quorum configuration valid from {valid_from} pins no 32-byte fingerprint")]
+    TrustRootFingerprintInvalid { valid_from: u64 },
     #[error("input too large: {what} exceeds the limit of {limit}")]
     InputTooLarge { what: &'static str, limit: usize },
     #[error("supplied transaction results do not hash to the header's txSetResultHash")]

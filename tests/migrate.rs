@@ -31,10 +31,7 @@ fn quorum(valid_from: u64, seed: u8) -> QuorumConfig {
         .map(|i| common::public_of(&common::signing_key(seed.wrapping_add(i))))
         .collect();
 
-    QuorumConfig {
-        quorum_set_xdr: common::quorum_set(&validators, 2),
-        valid_from,
-    }
+    common::pinned(common::quorum_set(&validators, 2), valid_from)
 }
 
 fn client_state(latest: u64, quorum_seed: u8) -> ClientState {
@@ -413,5 +410,101 @@ fn a_substitute_that_never_expires_is_refused() {
     assert!(matches!(
         migrate(&mut deps),
         Err(ContractError::InvalidClientState(_))
+    ));
+}
+
+#[test]
+fn a_substitute_whose_quorum_set_does_not_match_its_fingerprint_is_refused() {
+    let mut substitute = client_state(SUBSTITUTE_HEIGHT, 0x02);
+
+    substitute.quorum_configs[0].quorum_set_fingerprint = quorum(0, 0x01).quorum_set_fingerprint;
+    let mut deps = staged(client_state(SUBJECT_HEIGHT, 0x01), substitute);
+
+    assert!(matches!(
+        migrate(&mut deps),
+        Err(ContractError::TrustRootFingerprintMismatch)
+    ));
+    assert_eq!(
+        client_state_prefixed(&deps.storage, SUBJECT_PREFIX).map(|cs| cs.quorum_configs),
+        Some(vec![quorum(0, 0x01)])
+    );
+}
+
+#[test]
+fn a_substitute_without_a_fingerprint_is_refused() {
+    let mut substitute = client_state(SUBSTITUTE_HEIGHT, 0x02);
+
+    substitute.quorum_configs[0].quorum_set_fingerprint = vec![];
+    let mut deps = staged(client_state(SUBJECT_HEIGHT, 0x01), substitute);
+
+    assert!(matches!(
+        migrate(&mut deps),
+        Err(ContractError::TrustRootFingerprintInvalid { valid_from: 0 })
+    ));
+}
+
+#[test]
+fn a_substitute_carrying_an_unsound_rotation_is_refused() {
+    let validators: Vec<[u8; 32]> = (0..3)
+        .map(|i| common::public_of(&common::signing_key(0x30 + i)))
+        .collect();
+    let mut substitute = client_state(SUBSTITUTE_HEIGHT, 0x02);
+
+    substitute
+        .quorum_configs
+        .push(common::pinned(common::quorum_set(&validators, 1), 950));
+    let mut deps = staged(client_state(SUBJECT_HEIGHT, 0x01), substitute);
+
+    assert!(matches!(
+        migrate(&mut deps),
+        Err(ContractError::InvalidWire(_))
+    ));
+}
+
+#[test]
+fn the_contract_migrate_entry_point_pins_fingerprints_missing_from_older_state() {
+    use stellar_light_client::{
+        entrypoint::migrate,
+        msg::MigrateMsg,
+        store::{client_state, set_client_state, set_consensus_state},
+    };
+
+    let mut deps = mock_dependencies();
+    let mut older = self::client_state(SUBJECT_HEIGHT, 0x01);
+
+    older.quorum_configs.push(quorum(500, 0x02));
+
+    for config in older.quorum_configs.iter_mut() {
+        config.quorum_set_fingerprint = vec![];
+    }
+
+    set_client_state(&mut deps.storage, &older);
+    set_consensus_state(&mut deps.storage, SUBJECT_HEIGHT, &consensus(100, 0x11));
+    migrate(deps.as_mut(), mock_env(), MigrateMsg {}).expect("migrate should succeed");
+
+    assert_eq!(
+        client_state(&deps.storage).map(|cs| cs.quorum_configs),
+        Some(vec![quorum(0, 0x01), quorum(500, 0x02)])
+    );
+}
+
+#[test]
+fn the_contract_migrate_entry_point_refuses_a_stored_fingerprint_that_does_not_match() {
+    use stellar_light_client::{
+        entrypoint::migrate,
+        msg::MigrateMsg,
+        store::{set_client_state, set_consensus_state},
+    };
+
+    let mut deps = mock_dependencies();
+    let mut tampered = client_state(SUBJECT_HEIGHT, 0x01);
+
+    tampered.quorum_configs[0].quorum_set_fingerprint = vec![0u8; 32];
+    set_client_state(&mut deps.storage, &tampered);
+    set_consensus_state(&mut deps.storage, SUBJECT_HEIGHT, &consensus(100, 0x11));
+
+    assert!(matches!(
+        migrate(deps.as_mut(), mock_env(), MigrateMsg {}),
+        Err(ContractError::TrustRootFingerprintMismatch)
     ));
 }
